@@ -10,3 +10,5 @@ node_modules/
 libuv/
 runs/
 testset/.cache/
+*.md
+.idea/
