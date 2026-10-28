@@ -108,7 +108,7 @@ try {
         writeFileSync(join(repo, sourcePath), original);
       }
       if (snapshot !== null) assertPins(snapshot);
-      console.log(`Running ${control.id}; workflows=${snapshot === null ? "live scout/writers" : "fixed authoring snapshot"}`);
+      console.log(`Running ${control.id}; workflows=${snapshot === null ? "live verification authoring" : "fixed authoring snapshot"}`);
       const result = await runStageFlow({
         repoPath: repo, task, sessionRoot: join(output, "sessions"),
         sessionId: control.id, limitOverrides,

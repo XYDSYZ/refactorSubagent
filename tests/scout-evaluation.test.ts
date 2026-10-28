@@ -3,7 +3,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, write
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { verificationScoutDefinition } from "../src/agents/verification-scout.js";
+import { verificationPlanningPrompt, verificationPlanningTools } from "../src/agents/verification-planning.js";
+import { workflowPreflightContext } from "../src/agents/workflow-facts.js";
 import { runScoutSession, snapshotScoutSources } from "../testset/runner/scout-session.js";
 import { ScoutReferenceSchema, sha256, validateScoutEvidence, type ScoutInput } from "../testset/runner/scout-contract.js";
 import { parseScoutScoring, gradeScoutScoring } from "../testset/runner/scout-rubric.js";
@@ -27,14 +28,15 @@ function fixture(root: string) {
   return { repo, task: "Preserve main behavior", output: join(root, "evidence") };
 }
 
-describe("isolated scout evaluation boundaries", () => {
-  test("uses the production role and real MCP submission without starting writers", async () => {
+describe("isolated investigation evaluation boundaries", () => {
+  test("uses the production investigation guidance and MCP submission without implementing tests", async () => {
     const request = fixture(temp());
     const result = await runScoutSession(request, async (options) => {
-      const production = verificationScoutDefinition();
-      expect(options.allowedTools).toEqual(production.tools!);
-      expect(options.skills).toEqual(production.skills!);
-      expect(options.systemPrompt).toContain(readFileSync(join(ROOT, ".claude/plugins/workflow-spec/skills/verification-scout/SKILL.md"), "utf8"));
+      const input = JSON.parse(readFileSync(join(request.output, "scout-input.json"), "utf8"));
+      expect(options.allowedTools).toEqual(verificationPlanningTools());
+      expect(options.systemPrompt).toContain(verificationPlanningPrompt(input.task,
+        workflowPreflightContext(input.preflight.host, input.preflight.project)));
+      expect(options.systemPrompt).toContain(readFileSync(join(ROOT, ".claude/plugins/workflow-spec/skills/verification-planning/SKILL.md"), "utf8"));
       expect(options.agents).toBeUndefined();
       expect(options.allowedTools).not.toContain("Bash");
       expect(options.allowedTools).not.toContain("Write");
@@ -151,7 +153,11 @@ process.exitCode = result.ok ? 0 : 1;
     const out = join(root, "out");
     const run = (...args: string[]) => {
       const child = Bun.spawnSync([process.execPath, join(SUITE, "run.ts"), "--root", testRoot, "--no-color", ...args],
-        { stdout: "pipe", stderr: "pipe", timeout: 20_000 });
+        { stdout: "pipe", stderr: "pipe", timeout: 60_000 });
+      if (child.exitCode === null) {
+        throw new Error(`Evaluation CLI did not exit within its 60s test budget (signal=${child.signalCode}):\n` +
+          child.stdout.toString() + child.stderr.toString());
+      }
       return { exit: child.exitCode, text: child.stdout.toString() + child.stderr.toString() };
     };
     expect(run("--out", out, "--drop-env").exit).toBe(0);
@@ -182,5 +188,5 @@ process.exitCode = result.ok ? 0 : 1;
     const stale = JSON.parse(readFileSync(join(out, "summary.reevaluated.json"), "utf8"));
     expect(stale.counts.errored).toBe(1);
     expect(stale.cases[0].error).toContain("does not match");
-  }, 60_000);
+  }, 180_000);
 });

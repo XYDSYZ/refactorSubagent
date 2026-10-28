@@ -7,7 +7,7 @@ user-invocable: false
 description: >-
   Mandatory specification for generating TypeScript BuildWorkflow and
   TestWorkflow modules. Read workflow-api.md, build-output.md (or
-  test-output.md), verification-strategies.md for scout handoff and execution, and
+  test-output.md), verification-strategies.md for plan implementation and execution, and
   cmake.md/ctest.md when relevant BEFORE writing any
   workflow source. The host injects this skill when it asks you to author a
   workflow; do not skip it. Deviating from these specs gets your output
@@ -26,7 +26,7 @@ description: >-
 | `workflow-api.md` | **总是** | WorkflowContext 完整接口、capabilities 精确签名、常见反例 |
 | `build-output.md` | 生成 **BuildWorkflow** 时 | workflow-driven BuildWorkflow 规范：驱动构建 + validator 断言 |
 | `test-output.md` | 生成 **TestWorkflow** 时 | 自驱动 TestWorkflow 规范：ctx.expect、产物契约 |
-| `verification-strategies.md` | **test-writer 接收 scout 报告时**；build-writer 读选定分支 | 方案交接、辅助代码和两侧执行的交付要求 |
+| `verification-strategies.md` | **test-writer 完成源码调查后**；build-writer 读选定分支 | 计划落实、辅助代码和两侧执行的交付要求 |
 | `library-consumer.md` | 选择 **DLL / 共享库 / 静态库消费者** 时 | 两侧各自构建并链接真实库、加载与有效运行检查 |
 | `source-harness.md` | 选择 **局部源码测试** 时 | 独立 harness、真实模块与依赖、覆盖边界 |
 | `cmake.md` | 项目是 **CMake** 时 | CMake CLI 用法、`--target` 单值陷阱、MSVC Debug 路径 |
@@ -35,8 +35,8 @@ description: >-
 ## 生成流程
 
 1. 读 `workflow-api.md` + 对应输出 schema 文档（+ 工具文档如相关）
-2. test-writer 在读取项目源码前委托 verification-scout 判断可观察性与覆盖，基于报告确定范围，
-   再按需读具体接口；build-writer 确认所选方案的构建和产物用法
+2. test-writer 在同一会话内按 `verification-planning` 完成源码调查并保存计划，再实现具体用例；
+   build-writer 确认所选方案的构建和产物用法
 3. test-writer 写到指定路径；build-writer 通过 `generateBuildWorkflow` 提交源码与辅助材料
 4. 宿主校验源码、声明与材料；执行时通过 validator 检查产物，通过 expect 提交行为观测
 

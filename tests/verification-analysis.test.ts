@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { LocalDependencyRegistry } from "../src/agents/dep-registry.js";
 import { createDependencyMcpServer } from "../src/agents/dep-registry-server.js";
 import { VerificationAnalysisStore } from "../src/agents/verification-analysis.js";
-import { verificationScoutDefinition } from "../src/agents/verification-scout.js";
+import { verificationPlanningTools } from "../src/agents/verification-planning.js";
 import { mcpText, withMcpClient } from "./helpers/mcp-client.js";
 import { analysisReport } from "./helpers/verification-analysis.js";
 
@@ -21,18 +21,13 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("verification-scout tool boundary", () => {
+describe("isolated investigation tool boundary", () => {
   test("has only source reads and report/inspection tools, including for a custom server", () => {
-    const agent = verificationScoutDefinition("custom-registry");
-    expect(agent.tools).toEqual([
+    expect(verificationPlanningTools("custom-registry")).toEqual([
       "Read", "Glob", "Grep",
       "mcp__custom-registry__inspectWorkflow",
       "mcp__custom-registry__submitVerificationAnalysis",
     ]);
-    expect(agent.mcpServers).toEqual(["custom-registry"]);
-    expect(agent.skills).toEqual(["workflow-spec:verification-scout"]);
-    expect(agent.background).toBe(false);
-    expect(agent.maxTurns).toBeGreaterThan(0);
   });
 });
 

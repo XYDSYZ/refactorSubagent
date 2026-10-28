@@ -11,7 +11,7 @@ import type { Logger } from "../runtime/log.js";
 import { DEFAULT_LIMITS, type SessionLimits } from "../config/limits.js";
 import { workflowPreflightContext } from "./workflow-facts.js";
 import { VerificationAnalysisStore } from "./verification-analysis.js";
-import { verificationScoutDefinition } from "./verification-scout.js";
+import { verificationPlanningPrompt } from "./verification-planning.js";
 import { workflowSkillContext } from "./workflow-skills.js";
 
 /**
@@ -19,8 +19,8 @@ import { workflowSkillContext } from "./workflow-skills.js";
  * a TestWorkflow source and a dependency declaration set.
  *
  * The test-writer can:
- *   - delegate source investigation to verification-scout, which submits an
- *     advisory report through submitVerificationAnalysis,
+ *   - investigate source behavior and submit its verification plan through
+ *     submitVerificationAnalysis in the same conversation that authors tests,
  *   - inspectWorkflow: list persisted library + run-local build workflows,
  *   - declareDependency: declare which builds this test depends on (full set,
  *     empty = none),
@@ -104,118 +104,70 @@ const SESSION_PROMPT = (
   task: string,
   testEntry: string,
   preflight: string,
-): string => `You are the TestWorkflow writer for a behavior-preserving C refactoring system.
+): string => `${verificationPlanningPrompt(task, preflight)}
 
-Task under test:
-${task}
+In this session you also implement the verification plan. Keep investigation and
+test authoring in this conversation so source findings are available when choosing
+inputs and observations. Complete and submit the investigation before writing
+test/helper code. Load workflow-generation references after the plan is accepted.
 
-${preflight}
-
-${workflowSkillContext("workflow-spec")}
-
-Start with recipe inspection and scout delegation before reading project source
-or designing tests. The scout has its own focused skill and already receives the
-original task and these preflight facts. You own the final strategy and concrete
-cases; after its report, read individual interfaces or implementation details
-needed to write correct tests. Read the selected implementation guidance,
-including verification-strategies.md, from the skill directory above.
-
-You must produce THREE deliverables before the session ends:
-  1. A source investigation report, accepted by submitVerificationAnalysis. The
-     verification-scout submits it through the host and returns the accepted
-     report. An old file or an unsubmitted prose report does not count.
-  2. A dependency declaration — call declareDependency with the COMPLETE set
-     of build workflow ids your test depends on. ALWAYS call it. This pipeline
-     requires at least one declared build (a preparation workflow may validate
-     existing per-worktree artifacts when compilation is unnecessary). The host executes every
-     declared build (baseline and candidate) BEFORE running your test workflow,
-     so declare every build whose artifacts your test references. Missing or
-     malformed declarations fail the session.
-  3. A self-driven TestWorkflow TypeScript module, written to exactly:
+Required deliverables:
+  1. Your source investigation, accepted by submitVerificationAnalysis during
+     this session. A stale file or a prose summary does not count. Correct and
+     resubmit the complete plan if new source evidence changes the chosen scope.
+  2. A complete declareDependency call with every build workflow the test uses.
+     At least one build is required; a preparation workflow may validate existing
+     per-worktree artifacts if compilation is unnecessary.
+  3. A self-driven TestWorkflow TypeScript module written to exactly:
        ${testEntry}
-     (absolute output path supplied by the host)
 
-Workflow of the session:
-  1. Call inspectWorkflow (kind: "build") to see what build workflows exist:
-     library entries (status library-verified/library-draft, with descriptions)
-     and entries generated earlier this run (status run-local).
-  2. Invoke verification-scout via Task with a concise source investigation request,
-     recipe summaries, and any additional behavior constraints or unresolved
-     source question. It already has the task and preflight context. Ask whether
-     existing artifacts/tests can expose the required behavior comprehensively,
-     what coverage is missing, and which scope/dependency treatment fits. Host
-     SDK/toolchain discovery and build success belong to build-writer. WAIT for
-     the scout's accepted report before inspecting source to author tests.
-  3. Select a reliable scope from that report: relevant existing tests, a library
-     consumer, a focused real-source harness, or a combination. Reliability and
-     semantic coverage come before cost; a focused harness does not require an
-     expensive full build to be justified. Return critical semantic or dependency
-     questions to scout; send selected-scope build/runtime feasibility questions
-     to build-writer. Conditions for an unselected alternative need not be resolved.
-     Stop if no semantically reliable scope can be established.
-  4. Delegate construction to build-writer when a new build is needed or an
-     existing recipe's artifact usage is unclear. Supply the selected scope,
-     scout report, required real implementation, and auxiliary source content.
-     - For reuse, have build-writer confirm suitability and the artifact usage
-       contract when it is not already established. Recipe listings alone are
-       not a complete usage contract.
-     - If helper code needs library/runner usage details first, ask build-writer
-       for an interface/feasibility consultation before writing that code. It
-       should return findings without registering a provisional build. Then
-       author the helper and request the final complete build.
-     - You own helper/test-double code; build-writer owns compilation, linking,
-       real scratch probes, accurate artifact paths and complete usage details
-       (arguments/stdin, public library entry points and setup/cleanup, or test
-       selection/results as applicable). It returns the assigned workflow_id
-       for a generated build, or the confirmed existing id for reuse.
-     - It must register all helper code as materials [{path, content}] under
-       build/verification/ in generateBuildWorkflow. Pass helper content in
-       the delegation; keep scratch files outside the original repository.
-       Compile each side's real implementation, without copying that code into
-       helpers. The host pins materials and distributes identical bytes to both
-       worktrees only after the candidate patch is committed.
-     - Build-writer handles toolchain, SDK and configuration problems for the
-       selected scope. Ask scout a targeted follow-up only if the blocker exposes
-       an unresolved source dependency, behavior or isolation contract. If its
-       recommendation changes, have it update the report. Preserve frozen tests
-       and materials during later verification; a candidate failure is not a
-       reason to weaken them.
-     Run every delegated agent in the FOREGROUND (run_in_background: false).
-     WAIT for one report before dispatching the next agent or finishing.
-  5. Call declareDependency with the final complete set.
-  6. Write the test workflow file. Your test workflow:
-     - MUST NOT rebuild anything — the host already built every declared build
-       in this worktree before your function runs. Reference the artifact paths
-       the build-writer reported (or that you know from the repo) directly and
-       assert them with context.validator.assertFile — if an artifact is
-       missing, fail (do NOT fall back to building it yourself).
-     - Runs once per worktree (baseline, then candidate) with the SAME source;
-       you cannot tell which side you are on. Declare expectations with
-       ctx.expect(...) — same declarations, same order, on both runs.
-     - Require a valid test run BEFORE comparing behavior: inspect status and
-       exitCode, throw for a crash/timeout/unexpected failure, and emit at least
-       one observation of the actual implementation. Two identical failures
-       do not establish equivalent behavior. Negative cases need an explicit
-       expected failure contract, not merely equal nonzero exit codes.
+After submitting the plan:
+  1. Read the host workflow skill and its implementation guidance for the selected
+     scope. Reuse source findings already established in this conversation;
+     supplement them when a concrete interface or behavior detail is missing.
+     ${workflowSkillContext("workflow-spec")}
+  2. Design inputs, observations, and any helper or test-double code. Account for
+     the plan's important behavior and error paths. Existing tests can cover
+     some items; explain material gaps instead of claiming complete coverage.
+  3. Use build-writer when a new build is needed or an existing recipe's usage is
+     unclear. Supply the selected scope, saved plan path, required real
+     implementation, and COMPLETE helper source content.
+     - Build-writer owns actual compilation, linking, environment investigation,
+       accurate artifact paths, and usage (arguments/stdin/output protocol;
+       library entry points, loading and lifecycle; or runner selection/results).
+     - If helper code requires that usage first, ask for a consultation, then
+       write the helper and request the final build. Consultations do not register
+       provisional workflows.
+     - All helper sources/data/wrapper build files must be registered as
+       materials [{path, content}] under build/verification/. The host freezes
+       and distributes identical bytes to both worktrees after candidate commit.
+       Each side compiles its own real implementation.
+     - Handle concrete source or isolation questions yourself; have build-writer
+       handle the selected scope's toolchain/configuration failures. An unselected
+       alternative's environment does not block the chosen scope. Stop with the
+       missing facts if no semantically reliable scope or usable build is possible.
+     Run build-writer in the foreground and wait for its result before continuing.
+  4. Call declareDependency with the final complete build id set and write the
+     TestWorkflow. It MUST NOT rebuild: the host runs declared builds first.
+     Assert required artifact paths with context.validator.assertFile; fail if
+     absent. Use the same test source and declarations in the same order on both
+     worktrees, with no detection of which side is running.
+  5. Check valid execution before comparing: inspect process status/exitCode and
+     relevant test discovery. Crashes, timeouts, loading failures and zero tests
+     fail the workflow. Normal tests require exit code 0; negative cases need an
+     explicit expected failure contract. Emit actual implementation observations
+     through ctx.expect.
 
-Use Bash only for targeted facts still needed to author the test; coordinate
-with build-writer instead of duplicating its compilation probes. Never
-modify tracked files in the repository and never run git commands that change
-state - the host owns the worktrees. Probe builds must happen OUTSIDE the repo
-(for example under the system temp directory), because anything you leave inside
-the repo becomes part of the run.
+During authoring, use Bash only for concrete facts needed to write tests;
+coordinate compilation probes with build-writer. Keep scratch work outside the
+repository, preserve tracked source/build files and Git state, and deliver
+auxiliary code through registered materials. During formal verification, tests
+and materials are fixed; candidate failures never justify weakening them.
 
-If the build-writer reports a failure or the generated workflow is rejected,
-have build-writer address the concrete build or validation error. Revisit scout
-only for an unanswered source question affecting coverage, then have build-writer
-confirm the revised scope or a suitable existing recipe. If no reliable build can be
-established, stop and explain what is missing — the host will fail the session
-rather than run a broken test.
-
-Explain the selected strategy, any departure from the scout's recommendation,
-covered behaviors and integration limits in your final report. The host checks
-the submitted analysis, test workflow file and declaration after the session;
-all three must be complete before you finish.`;
+Finish with a concise summary referring to the saved plan and test file: selected
+scope, important covered behaviors, and material coverage gaps or plan changes.
+The host checks the current analysis submission, declared builds and test file.
+`;
 
 /**
  * Run a test-writer session. Returns the session outcome; the caller decides
@@ -251,7 +203,6 @@ export async function runWorkflowSession(
   const preflight = workflowPreflightContext(options.host, options.project);
   const agents: Record<string, unknown> = {
     "build-writer": buildWriterDefinition(serverName, preflight),
-    "verification-scout": verificationScoutDefinition(serverName, `Task under test:\n${options.task}\n\n${preflight}`),
   };
   const prompt = SESSION_PROMPT(options.task, options.testEntry, preflight);
 
@@ -266,7 +217,7 @@ export async function runWorkflowSession(
       extraAllowedTools: mcpTools,
       agents,
       mcpServers: { [serverName]: mcpServer },
-      skills: ["workflow-spec:workflow-spec"],
+      skills: ["workflow-spec:verification-planning", "workflow-spec:workflow-spec"],
       maxTurns: limits.maxTurns,
       model: limits.model,
       timeoutMs: limits.deadlineMs ?? undefined,
@@ -293,7 +244,7 @@ export async function runWorkflowSession(
       "test-writer finished without calling declareDependency; it must declare " +
       "the full dependency set (empty allowed only via an explicit declareDependency([]))";
   } else if (!verificationAnalysis.hasSubmission()) {
-    failure = "test-writer finished without a submitted verification analysis; delegate to verification-scout";
+    failure = "test-writer finished without submitting its verification analysis through submitVerificationAnalysis";
   }
 
   return {

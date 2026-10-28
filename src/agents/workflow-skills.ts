@@ -1,9 +1,9 @@
 import { join, resolve } from "node:path";
 
-/** Shared by SDK plugin loading and the skill pointers given to every writer/scout. */
+/** Shared by SDK plugin loading, authoring sessions, and investigation evaluation. */
 export const TOOL_PLUGIN_DIR = resolve(import.meta.dir, "..", "..", ".claude", "plugins", "workflow-spec");
 
-type WorkflowSkillName = "workflow-spec" | "verification-scout";
+type WorkflowSkillName = "workflow-spec" | "verification-planning";
 
 export function workflowSkillPath(name: WorkflowSkillName): string {
   return join(TOOL_PLUGIN_DIR, "skills", name, "SKILL.md");

@@ -15,8 +15,9 @@
 - [`02-testset-requirements.md`](../docs/testset/02-testset-requirements.md) — 判据需求与判定规则
 - [`01-refactor-targets.md`](../docs/testset/01-refactor-targets.md) — 可重构点与覆盖缺口
 - [`04-rubric.md`](../docs/testset/04-rubric.md) — 裁判给分标准
-- [`05-scout-evaluation.md`](../docs/testset/05-scout-evaluation.md) — scout 独立评测：分级场景、证据评分与复评
-- [`07-writer-integration.md`](../docs/testset/07-writer-integration.md) — 真实 scout/writer 组合、固定补丁与无模型复跑
+- [`05-scout-evaluation.md`](../docs/testset/05-scout-evaluation.md) — 源码调查独立评测：分级场景、证据评分与复评
+- [`07-writer-integration.md`](../docs/testset/07-writer-integration.md) — 真实测试编写、固定补丁与无模型复跑
+- [`08-merged-authoring-comparison-2026-10-28.md`](../docs/testset/08-merged-authoring-comparison-2026-10-28.md) — 调查与编写合并的真实运行对比、覆盖与耗时
 
 ```bash
 cd <repo-root>

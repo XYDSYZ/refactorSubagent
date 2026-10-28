@@ -2,37 +2,38 @@
 
 Preflight 负责发现宿主工具路径、查询 CMake 元数据和识别 C 项目，不编译临时工程。
 工具路径和项目状态不代表构建已通过，真实构建由 build-writer 和所选 workflow 确认。
-test-writer 先委托 `verification-scout` 调查行为和依赖，
-再决定复用相关测试、构建库消费者，或编译局部源码 harness。build-writer 负责实测构建与产物使用说明，
-test-writer 负责具体用例、辅助代码和 TestWorkflow。独立 Analyze 已移除；scout 位于 workflows 阶段内部。
+test-writer 在同一会话内调查行为和依赖，再选择并实现相关测试、库消费者或局部源码 harness。
+build-writer 负责实测构建与产物使用说明，test-writer 负责具体用例、辅助代码和 TestWorkflow。
+独立 Analyze 与固定的 scout 子会话均已移除，源码调查保留为 workflows 编写的第一步。
 
-## 调查与写作的交接
+## 同一会话内调查与编写
 
-scout 使用独立的 `workflow-spec:verification-scout` skill，仅有 Read/Glob/Grep、配方查询和报告提交工具，
-不加载 Workflow API 编写规范，没有 shell、源码写入或进一步派生 agent 的工具。
-它共用 test-writer 会话的取消/超时，最多 24 轮，前台返回后 writer 才继续。
+`verificationPlanningPrompt` 和 `workflow-spec:verification-planning` skill 提供调查步骤、完成条件与计划规范。
+test-writer 先理解源码并提交计划，保留已读内容，再加载工作流实现文档并编写测试。
+生产只注册 build-writer 子角色；test-writer 继续使用现有会话预算，不增加顶层阶段。
 
 报告包括被测行为、首选方案和依据、依赖处置、覆盖限制与未知项。依赖区分编译条件、内部逻辑、资源和外部能力；
 建议替身时必须交代接入点、模拟行为、保留的真实实现和损失的集成覆盖。源码确认、Preflight 测量和推断分别标记。
 范围按语义覆盖和可靠性优先选择，独立模块不需要等到完整构建昂贵才选择局部验证。
 
-test-writer 在读取项目源码前先查询配方并委托 scout，报告返回后按需读具体接口。
-scout 根据源码判断现有产物/测试是否能充分观察目标行为；行为、依赖和覆盖限制明确后就提交。
+test-writer 查询配方并根据源码判断现有产物/测试是否能充分观察目标行为；行为、依赖和覆盖限制明确后就提交。
 所选方案的构建条件交给 build-writer，未选方案的环境未知项不阻塞推荐；关键源码契约缺失时仍保留 `undetermined`。
-三个角色均收到宿主所加载 plugin 内的绝对 skill 路径，文档引用从同一目录解析，不依赖被测仓库中的旧安装副本。
+生产会话与独立评测均使用宿主所加载 plugin 内的绝对 skill 路径，文档引用从同一目录解析。
+行为、证据、依赖和未知项各自集中表达；没有现成库目标不构成否定库消费者的理由。
+重要行为和错误路径需在具体测试中落实，实质覆盖缺口在最终总结中说明。
 
 通过 `submitVerificationAnalysis` 提交，宿主校验结构并原子保存到：
 `<repo>/.refactor/runs/<sessionId>/workflows/verification-analysis.json`。
 自动编写会话要求本次成功提交，旧报告文件不能代替；结束、超时或异常退出后关闭提交。
 报告仅为建议，不注册构建或共享材料，不参与两侧行为比较。预置 workflows 直接绕过 AI 会话及这项要求。
 
-test-writer 仍决定最终方案；产物形态、准确路径及可观察入口的使用说明由 build-writer 提供。
+test-writer 决定最终方案；产物形态、准确路径及可观察入口的使用说明由 build-writer 提供。
 消费者需要先知道库/运行器接口时，先咨询 build-writer，再由 writer 写辅助代码，最后请求实测并登记完整构建。
 咨询不登记半成品。配方列表不等于使用说明，复用时也需确认参数/标准输入/输出协议、公开函数与链接加载/生命周期，
 或测试选择和结果读取等实际所需信息。
 
-工具链、SDK 和配置问题由 build-writer 排查；只有暴露影响覆盖判断的源码依赖、行为或隔离契约疑问时，
-才请 scout 定向补查，建议变化时提交完整替换报告。调整限于 workflows 编写阶段。
+工具链、SDK 和配置问题由 build-writer 排查；影响覆盖判断的源码依赖、行为或隔离契约疑问由
+test-writer 定向补查，方案变化时提交完整替换计划。调整限于 workflows 编写阶段。
 正式验证使用固定后的测试与材料，不能为了让候选通过而更换替身或弱化测试。
 宿主的结构/提交检查不证明报告内容真实，也不证明策略选择正确；真实 AI 调查质量需要单独验收。
 
@@ -100,8 +101,10 @@ generateBuildWorkflow({
 
 ## 实际边界
 
-scout 的独立能力评测见 [分级场景、评分与运行说明](testset/05-scout-evaluation.md)。
-它直接复用调查角色，单独评估结论，不代替 writer 组合测试或完整双侧执行验收。
+调查能力的独立评测见 [分级场景、评分与运行说明](testset/05-scout-evaluation.md)。
+它复用生产会话的调查提示词和指导文档，在计划被接受后结束；仅开放读取和报告提交工具。
+现有 scout 命令、场景 ID 与证据文件名保留，便于历史对比；生产不再创建同名子角色。
+该评测不包含测试实现的上下文负担，不代替完整编写和双侧执行验收。
 真实 writer 的局部源码组合验证与固定错误补丁结果见 [writer 组合验证](testset/07-writer-integration.md)。
 
 局部 harness 证明选定模块和输入的行为；库消费者证明选定 API 的行为。它们不会自动证明完整工程的构建与集成。

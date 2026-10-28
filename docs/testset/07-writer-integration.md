@@ -1,7 +1,11 @@
-# 真实 writer 组合验证
+# 真实测试编写与双侧执行验证
 
-本场景通过 `runStageFlow` 测试真实 scout、test-writer、build-writer 与宿主执行的交接。
-重构阶段使用固定补丁，验证阶段使用生产实现。它与 scout 独立评测、预置 workflow 的执行测试分别提供证据。
+本场景通过 `runStageFlow` 测试真实源码调查、测试编写、构建准备与宿主执行。
+当前 test-writer 在同一会话内调查并编写测试，build-writer 负责构建；下方带日期的记录保留当时架构。
+重构阶段使用固定补丁，验证阶段使用生产实现。它与独立调查评测、预置 workflow 的执行测试分别提供证据。
+
+合并前后真实运行、覆盖变化及已知汇总局限见
+[`2026-10-28 对比报告`](08-merged-authoring-comparison-2026-10-28.md)。
 
 ## 场景与判定
 
@@ -27,13 +31,17 @@
 编译失败、baseline 失败、超时、signal、进程启动失败都不算识别成功。
 汇总必须 `complete=true` 且所有控制符合预期才通过。
 
+当前自动汇总只识别候选原生进程非零退出的断言失败。如果原生程序正常输出，
+由 TypeScript 工作流检查实际输出后抛错，生产仍会中止验证，但汇总可能漏分类。
+这种结果应保留原始 `ok:false`，另行复核工作流断言和实际输出；不能用正常退出码或共同失败推断行为等价。
+
 ## 命令
 
 ```powershell
 # 无模型调用：验证控制补丁
 bun scripts/e2e-verification-authoring.ts --controls-only --out runs/writer-controls-new
 
-# 调用真实 writer，继承其 scout/build-writer；随后固定复用产物测试错误补丁
+# 调用真实测试编写会话与构建子角色；随后固定复用产物测试错误补丁
 bun scripts/e2e-verification-authoring.ts --out runs/writer-live-new --limit sessions.testWriter.model=sonnet
 
 # 保留已生成方案，换一个新结果目录重新执行三个补丁，不再调用模型

@@ -167,7 +167,7 @@ export function createDependencyMcpServer(
       ...(verificationAnalysis !== undefined ? [{
         name: "submitVerificationAnalysis",
         description:
-          "Save verification-scout's source investigation for this session. Report the " +
+          "Save the test author's source investigation and verification plan for this session. Report the " +
           "recommended scope, required behavior observations, dependency treatment, evidence, limits, " +
           "and open questions. For a test-double, identify its existing seam, simulated " +
           "behavior, real implementation to retain, and lost integration coverage. " +

@@ -12,6 +12,8 @@ import {
 } from "../src/agents/workflow-session.js";
 import { mcpText, withMcpClient } from "./helpers/mcp-client.js";
 import { analysisReport } from "./helpers/verification-analysis.js";
+import { verificationPlanningPrompt } from "../src/agents/verification-planning.js";
+import { workflowPreflightContext } from "../src/agents/workflow-facts.js";
 
 const tempRoots: string[] = [];
 afterEach(() => {
@@ -152,7 +154,7 @@ describe("runWorkflowSession", () => {
     const o = h.captured();
     expect(o).not.toBeNull();
     expect(o!.agents["build-writer"]).toBeDefined();
-    expect(o!.agents["verification-scout"]).toBeDefined();
+    expect(Object.keys(o!.agents)).toEqual(["build-writer"]);
     expect(o!.mcpServers["dep-registry"]).toBeDefined();
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__inspectWorkflow");
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__declareDependency");
@@ -171,7 +173,6 @@ describe("runWorkflowSession", () => {
     const roles = [
       { prompt: o.prompt, skill: "workflow-spec" },
       { prompt: (o.agents["build-writer"] as AgentDefinition).prompt, skill: "workflow-spec" },
-      { prompt: (o.agents["verification-scout"] as AgentDefinition).prompt, skill: "verification-scout" },
     ];
     for (const role of roles) {
       const entry = resolve(import.meta.dir, "..", ".claude", "plugins", "workflow-spec", "skills", role.skill, "SKILL.md");
@@ -180,6 +181,7 @@ describe("runWorkflowSession", () => {
       expect(role.prompt).not.toContain(staleSkill.split("\\").join("/"));
     }
     expect(readFileSync(staleSkill, "utf8")).toBe("outdated workflow guidance");
+    expect(o.prompt).toContain(resolve(import.meta.dir, "..", ".claude", "plugins", "workflow-spec", "skills", "verification-planning", "SKILL.md").split("\\").join("/"));
   });
 
   test("session model from limits reaches the agent runner", async () => {
@@ -203,15 +205,14 @@ describe("runWorkflowSession", () => {
     expect(result.testEntryExists).toBe(false);
   });
 
-  test("session prompt delegates investigation before test design and requires the report", async () => {
+  test("shares its investigation instructions with the isolated evaluation and keeps the report requirement", async () => {
     const h = makeSessionHarness({ writeTestEntry: true });
     await h.run();
     const o = h.captured();
     expect(o!.prompt).toContain("declareDependency");
-    expect(o!.prompt).toContain("MUST NOT rebuild");
-    expect(o!.prompt).toContain("inspectWorkflow");
     expect(o!.prompt).toContain("build-writer");
-    expect(o!.prompt).toContain("verification-scout");
+    expect(o!.prompt).toContain(verificationPlanningPrompt("verify trim behavior",
+      workflowPreflightContext(minimalHost(), minimalProject(h.repoDir))));
     expect(o!.prompt).toContain("submitVerificationAnalysis");
   });
 

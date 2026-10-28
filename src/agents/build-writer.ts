@@ -49,8 +49,8 @@ Tool availability in this session:
     directory outside the repository. Never change tracked files or Git state.
 Read the host-provided skill file and its selected verification-strategies guidance.
 
-The test-writer selects the verification scope using verification-scout's source
-investigation. You own build feasibility and the artifact usage contract. If
+The test-writer investigates source behavior and selects the verification scope.
+Use its saved plan and concrete request. You own build feasibility and the artifact usage contract. If
 asked only for an interface/feasibility consultation (for example before a
 consumer can be written), return confirmed usage requirements and concrete
 blockers without generating a provisional workflow. When asked to finalize,
@@ -59,9 +59,9 @@ complete workflow with all helper inputs registered. A known existing recipe
 can be reused only when it fits the selected scope; inspect its implementation
 and report its usage contract rather than assuming the listing contains it.
 Handle toolchain, SDK and configuration issues for the selected scope here; report
-any remaining build blocker to test-writer. Request a scout follow-up only for a
-specific unanswered source dependency, behavior or isolation contract affecting
-coverage. Test-writer authors test cases and test-double logic.`;
+any remaining build blocker to test-writer. Identify a specific unanswered source
+dependency, behavior or isolation contract if it affects coverage, so test-writer
+can investigate it. Test-writer authors test cases and test-double logic.`;
 
 const REPORTING_CONTRACT = `After your workflow is generated, your FINAL message must report to the caller:
   1. the assigned workflow_id,

@@ -1,8 +1,10 @@
-# verification-scout 独立评测
+# 源码调查与验证方案的独立评测
 
 本层只评价调查能力：能否找到真实行为、选择可靠范围、处理依赖并诚实报告未知项。
-复用生产 `verificationScoutDefinition`、专用 skill、Preflight 和 MCP 报告存储，不启动
-test-writer、build-writer 或 refactor，不增加生产流水线阶段。它不能证明后续 writer 能正确实现测试。
+复用生产 `verificationPlanningPrompt`、`verification-planning` skill、Preflight 和 MCP 报告存储，
+在计划被接受后结束，不进行测试实现、构建或重构。生产由同一个 AI 完成调查与测试编写，
+不再启动独立 scout。旧命令、场景 ID 与证据文件名保留，以便比较历史结果。
+本评测不能证明带有测试编写上下文的完整会话同样有效，完整编写与执行仍需另测。
 
 首批材料采用六个小型 C 工程，三档各两例。难度来自判断所需的信息和失败风险，而非文件数量。
 任务简报只描述待重构对象；推荐、关键事实与评分权重保存在独立 reference 中。
@@ -22,15 +24,15 @@ test-writer、build-writer 或 refactor，不增加生产流水线阶段。它�
 **保留真实资源**。进阶档分别要求扩大范围，以及承认证据不足。
 不强制六例各自选择唯一策略；有依据、覆盖相同风险的替代或组合方案可满分。
 
-共享库用例要求调查公开边界是否必要，并不要求 scout 编写产物使用手册。
+共享库用例要求调查公开边界是否必要，调查不需要编写产物使用手册。
 准确产物路径、构建命令、链接/加载方法和完整调用说明仍属于 build-writer。
 
 ## 执行与输入边界
 
 `testset/run.ts` 发现 `kind: "scout"` 后，准备独立源码目录，启动
-`scripts/eval-scout.ts`。测试专用 session 将生产角色作为主会话执行；SDK 主会话的
-`skills` 是发现过滤器，子 agent 的 `skills` 是预加载器，因此这里显式预加载同一份 skill 内容，
-避免独立入口丢失生产角色的指导。保留相同的源码读取、配方查询与报告提交工具。
+`scripts/eval-scout.ts`。测试专用 session 使用生产会话相同的调查提示词前缀，显式预加载同一份
+调查 skill。只开放源码读取、配方查询与报告提交工具，不加载工作流实现指导，也不创建子角色。
+该工具子集由生产模块提供，生产完整会话则另外拥有写测试和请求构建的工具。
 
 默认模型沿用本机配置；默认 24 轮、300 秒模型期限、90 秒无消息期限。
 每例可用 `scout: {model, maxTurns, deadlineMs, stallMs}` 覆盖，`--scout-model` 的优先级最高。
@@ -130,7 +132,7 @@ bun testset/run.ts --subject scout --reevaluate runs/scout-trial-a
 以下检查不调用模型：
 
 ```powershell
-bun test tests/scout-evaluation.test.ts tests/testset-platform.test.ts tests/testset-reevaluate.test.ts tests/verification-scout.test.ts
+bun test tests/scout-evaluation.test.ts tests/testset-platform.test.ts tests/testset-reevaluate.test.ts tests/verification-analysis.test.ts
 bun testset/run.ts --self-test
 bun scripts/check-scout-fixtures.ts
 ```

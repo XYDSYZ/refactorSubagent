@@ -1,8 +1,8 @@
-/** Test-only entry into the real scout definition. No writer or build session. */
+/** Test-only entry into the test author's investigation, stopping before test implementation. */
 import { lstatSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { runAgent, type DriverOptions, type DriverRun } from "../../src/agents/driver.js";
-import { verificationScoutDefinition } from "../../src/agents/verification-scout.js";
+import { verificationPlanningPrompt, verificationPlanningTools } from "../../src/agents/verification-planning.js";
 import { VerificationAnalysisStore } from "../../src/agents/verification-analysis.js";
 import { workflowPreflightContext } from "../../src/agents/workflow-facts.js";
 import { workflowSkillPath } from "../../src/agents/workflow-skills.js";
@@ -65,18 +65,19 @@ export async function runScoutSession(
   const sources = snapshotScoutSources(repo);
   const host = probeHost(repo);
   const project = detectCProject(repo);
-  const definition = verificationScoutDefinition("dep-registry", `Task under test:\n${request.task}\n\n${workflowPreflightContext(host, project)}`);
-  const skillPath = workflowSkillPath("verification-scout");
+  const planningPrompt = verificationPlanningPrompt(request.task, workflowPreflightContext(host, project));
+  const tools = verificationPlanningTools();
+  const skills = ["workflow-spec:verification-planning"];
+  const skillPath = workflowSkillPath("verification-planning");
   const skill = readFileSync(skillPath, "utf8");
-  // AgentDefinition.skills preloads content for subagents. The main-session
-  // options.skills only filters discovery, so preload the same bytes explicitly
-  // when evaluating the role without a parent/writer session.
-  const systemPrompt = `${definition.prompt}\n\n<preloaded-skill name="workflow-spec:verification-scout">\n${skill}\n</preloaded-skill>`;
+  // Main-session skills filter discovery; preload the same production guidance
+  // so this isolated investigation has no dependency on automatic skill discovery.
+  const systemPrompt = `${planningPrompt}\n\n<preloaded-skill name="workflow-spec:verification-planning">\n${skill}\n</preloaded-skill>`;
   const input: ScoutInput = {
     version: 1, task: request.task, preflight: { host, project }, sources,
     agent: {
-      prompt: systemPrompt, tools: definition.tools!, skills: definition.skills!, options,
-      skill: { path: ".claude/plugins/workflow-spec/skills/verification-scout/SKILL.md", content: skill, sha256: sha256(skill) },
+      prompt: systemPrompt, tools, skills, options,
+      skill: { path: ".claude/plugins/workflow-spec/skills/verification-planning/SKILL.md", content: skill, sha256: sha256(skill) },
     },
   };
   writeJson(join(output, "scout-input.json"), input);
@@ -89,8 +90,8 @@ export async function runScoutSession(
   try {
     run = await runAgentFn({
       cwd: repo, systemPrompt,
-      prompt: "Investigate the task under test and submit your verification analysis.",
-      allowedTools: [...definition.tools!], skills: [...definition.skills!],
+      prompt: "Complete only source investigation and submit the verification plan. Then finish with its saved path, the selected scope and critical blockers; test implementation is outside this evaluation.",
+      allowedTools: tools, skills,
       maxTurns: options.maxTurns, model: options.model,
       timeoutMs: options.deadlineMs, stallTimeoutMs: options.stallMs,
       sessionStore: new FileSessionStore(join(output, "session")),

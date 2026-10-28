@@ -31,8 +31,8 @@ const moduleRequire = createRequire(import.meta.url);
  * AgentDriver — thin wrapper over the Claude Agent SDK.
  *
  * Explicit SDK tool lists control availability; they are not an OS sandbox.
- * Writers/refactor may have Bash, while verification-scout has source reads
- * and its host report tools. The host separately checks source integrity.
+ * Writers/refactor may have Bash; isolated investigation evaluation uses source
+ * reads and host report tools. The host separately checks source integrity.
  */
 
 
