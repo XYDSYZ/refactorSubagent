@@ -4,15 +4,16 @@ user-invocable: false
 description: >-
   Investigate source behavior, existing coverage, and dependency treatment before
   choosing a verification scope and writing tests. Submit an evidence-based plan;
-  revisit it when a concrete source question changes coverage. Build feasibility
-  and artifact usage belong to build-writer.
+  revisit it when a concrete source question changes coverage. Build recipes and
+  intended artifact usage belong to build-writer; the host executes them later.
 ---
 
 # 先调查，再编写测试
 
 你在同一会话内理解代码、选择验证方式并编写测试。先完成本文件的调查步骤并提交计划，
 再读取工作流编写规范、设计具体用例。独立调查评测在计划被接受后结束。
-build-writer 负责所选范围的真实构建和产物使用说明。
+build-writer 编写所选范围的构建流程和预期产物使用说明；宿主随后执行构建与测试。
+编写阶段根据源码和宿主事实完成交付，无需提前编译、运行或模拟执行来证明成功。
 
 ## 调查步骤与完成条件
 
@@ -21,13 +22,13 @@ build-writer 负责所选范围的真实构建和产物使用说明。
 2. 检查相关测试、调用入口和构建声明，判断现有入口实际暴露了哪些目标行为、遗漏哪些。
    使用断言与目标的源码关联作为依据；测试或目标名称只用于定位。
 3. 追清影响这些行为的依赖，按下文决定保留真实实现、使用真实临时资源或在既有接口注入替身。
-   构建声明用来理解模块、宏和链接关系；本机工具链、安装位置和真实构建由 build-writer 确认。
+   构建声明用来理解模块、宏和链接关系；工具可用性使用宿主已有事实，运行时检查写入构建流程。
 4. 比较各方案的覆盖能力与可靠性，再比较实现成本。目标行为、关键依赖和覆盖限制已有依据后，
    调用 `submitVerificationAnalysis`，按 schema 保存计划；提交被接受即完成调查。
    关键契约缺失时提交 `undetermined` 和具体问题，等待资料后再决定可靠范围。
 
 计划应保留写测试所需的结论和源码引用，探索日志留在会话中。后续直接使用已读源码和计划；
-需要复核时围绕具体缺失信息补读。若构建实测暴露源码或隔离问题，定向补查并更新完整计划。
+需要复核时围绕具体缺失信息补读。若后续收到宿主诊断并获准修订，围绕具体源码或隔离问题补查。
 
 ## 选择验证范围
 
@@ -55,7 +56,8 @@ build-writer 负责所选范围的真实构建和产物使用说明。
 - `unresolved`：所选范围中尚未查明且影响可靠性的依赖，同时在 `openQuestions` 中说明。
 
 影响语义的未知项继续定向查源码；契约确实缺失时保留判断。
-所选范围的构建条件交给 build-writer 实测，仅列实际需要确认的条件。
+所选范围的构建条件交给 build-writer 写入流程，是否成功由宿主执行确认。
+尚未构建不属于源码契约缺失，不因此保留判断。
 未选方案的环境条件必要时记入 `limitations`，结束该方向的调查。
 例如局部函数不依赖完整应用的图形 SDK，SDK 是否安装就不影响局部建议。
 

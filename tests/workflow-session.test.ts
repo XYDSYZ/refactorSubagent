@@ -155,6 +155,9 @@ describe("runWorkflowSession", () => {
     expect(o).not.toBeNull();
     expect(o!.agents["build-writer"]).toBeDefined();
     expect(Object.keys(o!.agents)).toEqual(["build-writer"]);
+    // Authoring currently delivers source; execution remains with the host.
+    expect(o!.allowedTools).not.toContain("Bash");
+    expect((o!.agents["build-writer"] as AgentDefinition).tools).not.toContain("Bash");
     expect(o!.mcpServers["dep-registry"]).toBeDefined();
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__inspectWorkflow");
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__declareDependency");

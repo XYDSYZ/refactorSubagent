@@ -90,6 +90,7 @@ export interface WorkflowSessionResult {
   readonly failure: string | null;
 }
 
+// Temporarily omit Bash. Restore it here if authoring shell access is enabled again.
 export const TEST_WRITER_AGENT_TOOLS = [
   "Read",
   "Glob",
@@ -97,7 +98,6 @@ export const TEST_WRITER_AGENT_TOOLS = [
   "Write",
   "Edit",
   "Task",
-  "Bash",
 ] as const;
 
 const SESSION_PROMPT = (
@@ -132,9 +132,10 @@ After submitting the plan:
   3. Use build-writer when a new build is needed or an existing recipe's usage is
      unclear. Supply the selected scope, saved plan path, required real
      implementation, and COMPLETE helper source content.
-     - Build-writer owns actual compilation, linking, environment investigation,
-       accurate artifact paths, and usage (arguments/stdin/output protocol;
+     - Build-writer authors compilation/linking steps and describes intended
+       artifact paths and usage (arguments/stdin/output protocol;
        library entry points, loading and lifecycle; or runner selection/results).
+       The host executes the delivered workflows after this authoring session.
      - If helper code requires that usage first, ask for a consultation, then
        write the helper and request the final build. Consultations do not register
        provisional workflows.
@@ -142,27 +143,32 @@ After submitting the plan:
        materials [{path, content}] under build/verification/. The host freezes
        and distributes identical bytes to both worktrees after candidate commit.
        Each side compiles its own real implementation.
-     - Handle concrete source or isolation questions yourself; have build-writer
-       handle the selected scope's toolchain/configuration failures. An unselected
-       alternative's environment does not block the chosen scope. Stop with the
-       missing facts if no semantically reliable scope or usable build is possible.
+     - Handle concrete source or isolation questions yourself. Have build-writer
+       encode the selected scope's toolchain/configuration checks in the workflow.
+       An unselected alternative's environment does not block the chosen scope.
+       Stop for missing decisive source contracts, not merely because a build
+       has not yet been executed.
      Run build-writer in the foreground and wait for its result before continuing.
   4. Call declareDependency with the final complete build id set and write the
      TestWorkflow. It MUST NOT rebuild: the host runs declared builds first.
      Assert required artifact paths with context.validator.assertFile; fail if
      absent. Use the same test source and declarations in the same order on both
      worktrees, with no detection of which side is running.
-  5. Check valid execution before comparing: inspect process status/exitCode and
-     relevant test discovery. Crashes, timeouts, loading failures and zero tests
-     fail the workflow. Normal tests require exit code 0; negative cases need an
-     explicit expected failure contract. Emit actual implementation observations
-     through ctx.expect.
+  5. Write execution-validity checks into the TestWorkflow: inspect process
+     status/exitCode and relevant test discovery before comparisons. Crashes,
+     timeouts, loading failures and zero tests must fail the workflow. Normal
+     tests require exit code 0; negative cases need an explicit expected failure
+     contract. The workflow emits actual implementation observations through
+     ctx.expect when the host runs it.
 
-During authoring, use Bash only for concrete facts needed to write tests;
-coordinate compilation probes with build-writer. Keep scratch work outside the
-repository, preserve tracked source/build files and Git state, and deliver
-auxiliary code through registered materials. During formal verification, tests
-and materials are fixed; candidate failures never justify weakening them.
+Authoring produces source from repository reads, supplied preflight facts and
+build-writer's usage report. Finish after the plan, dependencies and test source
+are delivered. Compilation, execution and execution diagnostics belong to the
+host's later steps, not to this session. Do not run compilers, test programs,
+syntax probes or simulated workflow contexts. Preserve tracked source/build
+files and Git state, and deliver auxiliary code through registered materials.
+During formal verification, tests and materials are fixed; candidate failures
+never justify weakening them.
 
 Finish with a concise summary referring to the saved plan and test file: selected
 scope, important covered behaviors, and material coverage gaps or plan changes.

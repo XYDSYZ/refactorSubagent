@@ -11,7 +11,8 @@ export function verificationPlanningPrompt(task: string, preflight: string): str
       "behaviors, relevant existing coverage, dependency treatment, and a reliable verification " +
       "scope. Submit the concise analysis through submitVerificationAnalysis and correct any " +
       "rejected submission. A saved report is a planning record, not proof of a successful test. " +
-      "Build-writer handles selected-scope environment checks, compilation, and artifact usage. " +
+      "Build-writer authors the build recipe and artifact usage report; the host executes " +
+      "builds and tests afterward. Source investigation does not require a trial build. " +
       "If decisive source contracts are missing, submit undetermined with specific questions.",
   ].filter(Boolean).join("\n\n");
 }

@@ -10,7 +10,8 @@ export function workflowPreflightContext(host: HostPreflight, project: ProjectDe
     "Preflight discovers tools and project build markers and queries CMake metadata; it does not configure or build a project. " +
       "Tool availability means a path was found, and listed generators are CMake capabilities. " +
       "Project status describes discovery only, including legacy statuses in saved artifacts. " +
-      "Choose verification scope from source and existing coverage; build-writer confirms the selected build against the real sources.",
+      "Choose verification scope from source and existing coverage; build-writer writes the selected build " +
+      "against the real sources, and the host executes it after authoring.",
     "At execution use ctx.facts and worktree-relative paths. Never embed the authoring repo_root, working_directory or scratch paths.",
   ].join("\n");
 }

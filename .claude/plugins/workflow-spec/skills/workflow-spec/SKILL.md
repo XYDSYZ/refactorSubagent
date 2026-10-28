@@ -36,7 +36,7 @@ description: >-
 
 1. 读 `workflow-api.md` + 对应输出 schema 文档（+ 工具文档如相关）
 2. test-writer 在同一会话内按 `verification-planning` 完成源码调查并保存计划，再实现具体用例；
-   build-writer 确认所选方案的构建和产物用法
+   build-writer 编写所选方案的构建流程和预期产物用法；编写阶段只交付代码，不执行构建或测试
 3. test-writer 写到指定路径；build-writer 通过 `generateBuildWorkflow` 提交源码与辅助材料
 4. 宿主校验源码、声明与材料；执行时通过 validator 检查产物，通过 expect 提交行为观测
 

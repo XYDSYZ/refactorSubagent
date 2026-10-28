@@ -9,13 +9,12 @@ describe("buildWriterDefinition", () => {
     expect(Array.isArray(def.tools)).toBe(true);
   });
 
-  test("allowlists read + shell + the registry tools, but no file writers", () => {
+  test("currently allowlists reads and registry tools for source delivery", () => {
     const def = buildWriterDefinition();
     expect(def.tools).toContain("Read");
     expect(def.tools).toContain("Glob");
     expect(def.tools).toContain("Grep");
-    // Bash is granted so the writer can probe the real build instead of guessing.
-    expect(def.tools).toContain("Bash");
+    expect(def.tools).not.toContain("Bash");
     // The workflow source reaches the host through the registry tool only.
     expect(def.tools).toContain("mcp__dep-registry__generateBuildWorkflow");
     expect(def.tools).not.toContain("Write");

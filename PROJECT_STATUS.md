@@ -763,12 +763,29 @@ Linux/macOS、writer 组合/完整流程及完整 `bun run check` 尚未运行�
 完整对比及限制见 [`08-merged-authoring-comparison-2026-10-28.md`](docs/testset/08-merged-authoring-comparison-2026-10-28.md)。
 输入与原始结果保存在本地 `runs/merge-comparison-20261028/` 等目录；本节随合并实现保存为本地提交，未推送。
 
+### 8.18 编写阶段交付代码，宿主执行（2026-10-28）
+
+按用户明确的职责边界调整两个编写角色：
+
+- 删除 build-writer 先在临时目录试编译、运行成功再交付的要求；test-writer 同样只编写辅助 C 与 TestWorkflow。
+- 编译、运行、运行时探测和断言保留在生成的 workflow 中，由宿主在后续步骤执行。
+- Bash 暂时从两者各自独立的工具列表移除，未删除通用 driver 的 shell 支持，后续可以在角色列表恢复。
+- 同步共用调查提示词和相关 skill，区分源码推导的产物用法与真实执行证据；尚未构建不构成源码调查的阻碍。
+- 未扩展真实 C 编译错误的自动回传修复：当前此类失败记录诊断后中止，自动修复仍只覆盖工作流源码策略违规。
+
+类型检查与六文件定向测试通过：59 pass / 0 fail、224 个断言、23.20 秒；diff 检查通过。
+一次 Windows 真实模型编写完成，两角色 shell 调用均为 0，宿主首次构建成功；等价修改 `ACCEPTED`，
+两个固定错误修改均触发行为断言并 `ABORTED`，自动汇总 `ok:true, complete:true`。材料与源码哈希核对通过。
+编写会话 285.916 秒，较此前合并版两轮减少 35.2% / 19.4%，较分离版减少 2.8%；单样本不能证明稳定提速。
+生成方案仍有 Linux/macOS 空可执行后缀被误拒绝，以及 SIZE_MAX 容量输入前提未确认的问题；没有改动已固定材料。
+详细结果见 [`09-authoring-without-execution-2026-10-28.md`](docs/testset/09-authoring-without-execution-2026-10-28.md)。
+
 ## 9. 已知限制与风险
 
 ### 9.1 权限边界依赖宿主目录，不是 OS 沙箱
 
-删除自研 hook 后 `Write` / `Edit` 无路径约束；2026-09-10 起三个会话还都有 Bash，
-因此"模型只能在其工作目录里动手"这一假设**不再成立**：test-writer 的 cwd 就是
+删除自研 hook 后 `Write` / `Edit` 无路径约束；refactor 仍有 Bash，两个编写角色已按 §8.18 暂时移除。
+"模型只能在其工作目录里动手"这一假设**不成立**：test-writer 的 cwd 就是
 目标仓库本身，refactor 的 worktree 虽在 session 目录下，也能用相对路径或绝对路径
 抵达仓库与会话状态文件。当前靠的是：显式工具白名单、`git push` deny 规则、
 一次性环境，以及**宿主不信任会话状态**（重新测量 diff、重跑权威 workflow、

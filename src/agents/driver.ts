@@ -31,8 +31,9 @@ const moduleRequire = createRequire(import.meta.url);
  * AgentDriver — thin wrapper over the Claude Agent SDK.
  *
  * Explicit SDK tool lists control availability; they are not an OS sandbox.
- * Writers/refactor may have Bash; isolated investigation evaluation uses source
- * reads and host report tools. The host separately checks source integrity.
+ * Refactor can use Bash; writers configure their own authoring tool lists.
+ * Isolated investigation uses source reads and host report tools. The host
+ * separately checks source integrity.
  */
 
 

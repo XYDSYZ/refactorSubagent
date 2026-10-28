@@ -18,6 +18,7 @@
 - [`05-scout-evaluation.md`](../docs/testset/05-scout-evaluation.md) — 源码调查独立评测：分级场景、证据评分与复评
 - [`07-writer-integration.md`](../docs/testset/07-writer-integration.md) — 真实测试编写、固定补丁与无模型复跑
 - [`08-merged-authoring-comparison-2026-10-28.md`](../docs/testset/08-merged-authoring-comparison-2026-10-28.md) — 调查与编写合并的真实运行对比、覆盖与耗时
+- [`09-authoring-without-execution-2026-10-28.md`](../docs/testset/09-authoring-without-execution-2026-10-28.md) — 编写期间只交付代码、宿主执行的单次真实结果
 
 ```bash
 cd <repo-root>
