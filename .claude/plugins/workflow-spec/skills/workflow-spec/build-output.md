@@ -99,8 +99,11 @@ export default async (ctx) => {
 
   // 5. 断言产物存在（探测真实路径后断言，不猜）
   const has = async (p: string) => ctx.fs.exists(p);
-  const app = (await has("build/Debug/uv_run_tests.exe")) ? "build/Debug/uv_run_tests.exe" : "build/Debug/uv_run_testsd.exe";
-  const appA = (await has("build/Debug/uv_run_tests_a.exe")) ? "build/Debug/uv_run_tests_a.exe" : "build/Debug/uv_run_tests_ad.exe";
+  const suffix = ctx.facts.host.executable_suffix;
+  const sharedPath = "build/Debug/uv_run_tests" + suffix;
+  const staticPath = "build/Debug/uv_run_tests_a" + suffix;
+  const app = (await has(sharedPath)) ? sharedPath : "build/Debug/uv_run_testsd" + suffix;
+  const appA = (await has(staticPath)) ? staticPath : "build/Debug/uv_run_tests_ad" + suffix;
   await ctx.validator.assertFile(app, "shared test runner");
   await ctx.validator.assertFile(appA, "static test runner");
 };

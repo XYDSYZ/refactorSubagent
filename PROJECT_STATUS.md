@@ -780,6 +780,15 @@ Linux/macOS、writer 组合/完整流程及完整 `bun run check` 尚未运行�
 生成方案仍有 Linux/macOS 空可执行后缀被误拒绝，以及 SIZE_MAX 容量输入前提未确认的问题；没有改动已固定材料。
 详细结果见 [`09-authoring-without-execution-2026-10-28.md`](docs/testset/09-authoring-without-execution-2026-10-28.md)。
 
+### 8.19 统一可执行文件后缀指导（2026-10-28）
+
+构建与测试主提示词统一直接拼接 `facts.host.executable_suffix`，明确 Linux/macOS 的空字符串是合法后缀，
+不能通过真假或长度检查判错、用默认值替换。移除构建提示词中按平台或读取 CMakeCache 重新推导后缀的指引。
+API 文档补充直接拼接示例，产物断言、构建示例和验证方式说明同步使用该字段；CMake 配置目录示例明确标注平台。
+
+本轮仅调整提示词与文档。类型检查通过；构建角色与工作流会话两文件测试 20 pass / 0 fail、76 个断言；
+diff 检查通过。未重跑真实模型或 Linux/macOS，§8.18 的原始生成材料与运行证据保持原样。
+
 ## 9. 已知限制与风险
 
 ### 9.1 权限边界依赖宿主目录，不是 OS 沙箱

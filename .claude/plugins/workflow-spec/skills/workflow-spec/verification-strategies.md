@@ -38,7 +38,8 @@ test-writer 按计划设计具体用例和替身代码。build-writer 编写构�
 进入正式验证后使用已固定的测试与材料，不能因候选失败而弱化它们。
 
 辅助材料不进入重构补丁，不覆盖受控文件，执行期间不能修改。
-编译产物必须使用不同路径，例如输入 `build/verification/probe.c`、产物 `build/verification/probe.exe`。
+编译产物必须使用不同路径，例如输入 `build/verification/probe.c`、产物路径为
+`"build/verification/probe" + ctx.facts.host.executable_suffix`（后缀规则见 `workflow-api.md`）。
 含任务专属材料的构建本轮保持 run-local；不要假设它会进入通用配方库。
 
 宿主检查两侧 workflow 哈希、输入哈希、提交和受控源码，并记录真实 process/fs 观测；

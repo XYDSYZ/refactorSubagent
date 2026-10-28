@@ -53,7 +53,8 @@ for (const target of ["uv_run_tests", "uv_run_tests_a"]) {
 
 ### 陷阱 2：多配置生成器的产物在配置子目录
 
-Visual Studio / Ninja Multi-Config 生成器输出到 `<build_dir>/<Config>/<target>.exe`：
+Visual Studio / Ninja Multi-Config 生成器输出到 `<build_dir>/<Config>/<target><executable_suffix>`，
+后缀使用 `ctx.facts.host.executable_suffix`（见 `workflow-api.md`）。以下为 Windows 示例：
 
 ```text
 build/Debug/uv_run_tests.exe      # Debug 配置

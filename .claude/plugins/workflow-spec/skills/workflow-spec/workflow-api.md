@@ -43,7 +43,7 @@ interface WorkflowContext {
 {
   platform: "win32" | "linux" | "darwin";   // 当前平台
   arch: string;                              // 如 "x64"
-  executable_suffix: string;                 // win32 是 ".exe"，否则 ""
+  executable_suffix: string;                 // 总是提供：win32 是 ".exe"，Linux/macOS 是合法的空字符串 ""
   shell: string;                             // 检测到的 shell
   tools: Record<string, {                    // 工具探测结果
     available: boolean;                      // 是否在 PATH 上发现工具
@@ -57,6 +57,17 @@ interface WorkflowContext {
   };
 }
 ```
+
+**可执行文件路径**：构建和测试工作流直接把 `ctx.facts.host.executable_suffix` 拼接到不带扩展名的路径：
+
+```ts
+const executable =
+  "build/verification/text_copy_harness" + ctx.facts.host.executable_suffix;
+```
+
+Windows 得到 `text_copy_harness.exe`，Linux/macOS 得到 `text_copy_harness`。空字符串是合法后缀，不是缺失值。
+不要用 `if (!suffix)`、长度检查或 `suffix || ...` 将它判错或替换，也无需按 `platform` 或读取 CMakeCache 重新推导。
+编译输出、产物存在断言和启动命令使用同一路径；构建后用 `validator.assertFile` 检查实际产物存在。
 
 **规则**：通过 `host.tools[name].available` 判断工具路径是否已发现。
 默认 Preflight 只查询 CMake 版本和生成器元数据，不 configure/build。
@@ -164,14 +175,15 @@ assertAbsent(path: string, description?: string): Promise<void>; // 断言路径
 ```
 
 **规则**：
-- **构建类 workflow 必须用它断言每个产物存在**（如 `assertFile("build/Debug/app.exe", "test runner")`）
+- **构建类 workflow 必须用它断言每个产物存在**（如 `assertFile(executable, "test runner")`）
 - 断言失败 → throw → workflow 失败（fail-closed）
 - 这是**替代旧返回值 artifact 声明**的方式：**不需要返回产物清单**，函数正常返回即视为成功（断言已保证）
 
 示例：
 ```ts
-await validator.assertFile("build/Debug/uv_run_tests.exe", "shared test runner");
-await validator.assertFile("build/Debug/uv_run_tests_a.exe", "static test runner");
+const suffix = ctx.facts.host.executable_suffix;
+await ctx.validator.assertFile("build/Debug/uv_run_tests" + suffix, "shared test runner");
+await ctx.validator.assertFile("build/Debug/uv_run_tests_a" + suffix, "static test runner");
 ```
 
 ### expect（WorkflowExpectApi，双侧声明比较——仅自驱动 TestWorkflow）

@@ -52,8 +52,9 @@ the build itself (workflow-driven): declare it explicitly at the top of the sour
 and make the default-exported function return nothing (void). Do NOT return a BuildWorkflowOutput object; the
 host no longer consumes one. Instead, after the real build steps complete, assert every produced artifact exists
 with context.validator:
-  await context.validator.assertFile("build/Debug/app.exe", "test runner");
-  await context.validator.assertFile("build/Debug/app_a.exe", "static test runner");
+  const suffix = context.facts.host.executable_suffix;
+  await context.validator.assertFile("build/Debug/app" + suffix, "test runner");
+  await context.validator.assertFile("build/Debug/app_a" + suffix, "static test runner");
 assertFile throws when the path is missing, failing the workflow (fail-closed). Use assertDir for directories and
 assertAbsent to assert a path does not exist.
 
@@ -93,11 +94,12 @@ by the host and shared by both sides. Keep generated outputs separate from those
 tracked project sources or their build files to make testing possible, and never replace the implementation
 under test with a copy, stub, or prebuilt binary from another worktree.
 
-Executable output paths on Windows end in .exe; on other platforms they do not. Decide the suffix from measured
-facts, never by guessing: ctx.facts.host.platform is "win32" on Windows (check it at runtime and append ".exe"
-to asserted artifact paths accordingly), or read CMAKE_EXECUTABLE_SUFFIX from the generated CMakeCache.txt after
-configure. Do not assume a bare path is the real artifact — the host rejects workflows that assert paths the
-build did not produce.
+For executable output paths, append ctx.facts.host.executable_suffix directly to the platform-neutral path:
+  const executable = "build/verification/text_copy_harness" + ctx.facts.host.executable_suffix;
+The host always supplies this string: ".exe" on Windows, "" on Linux/macOS. The empty string is a VALID suffix.
+Use the resulting path consistently for compiler output, validator.assertFile, and process.run. Never reject an
+empty suffix or replace it with a truthiness fallback (suffix || ...). Use the supplied suffix instead of
+re-deriving it from host.platform or CMakeCache.txt; validate that the resulting artifact exists after building.
 
 The workflow source may use only injected WorkflowContext capabilities when execution is needed. It must not import
 node:/bun: modules or access process.*, Bun.*, the network, git, or arbitrary files. The host executes the source,
@@ -152,6 +154,10 @@ implementation and record actual observed results. Declare at least one expectat
 missing test discovery or unexpected nonzero exit must fail the workflow BEFORE comparison; two
 identical failures are not evidence of behavior preservation. Expected negative cases need an explicit
 per-side check of the intended error, as well as cross-side behavior observations.
+
+For executable paths, append ctx.facts.host.executable_suffix directly to the platform-neutral path, matching
+the build workflow. The host supplies ".exe" on Windows and "" on Linux/macOS; the empty string is valid.
+Use the resulting path for validator.assertFile and process.run without rejecting or replacing an empty suffix.
 
 Run the actual tests with injected capabilities:
 - context.process.run({ program, args, cwd, timeoutMs }) runs a measured tool or workspace-relative executable.
