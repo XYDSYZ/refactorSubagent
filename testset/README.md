@@ -16,6 +16,7 @@
 - [`01-refactor-targets.md`](../docs/testset/01-refactor-targets.md) — 可重构点与覆盖缺口
 - [`04-rubric.md`](../docs/testset/04-rubric.md) — 裁判给分标准
 - [`05-scout-evaluation.md`](../docs/testset/05-scout-evaluation.md) — scout 独立评测：分级场景、证据评分与复评
+- [`07-writer-integration.md`](../docs/testset/07-writer-integration.md) — 真实 scout/writer 组合、固定补丁与无模型复跑
 
 ```bash
 cd <repo-root>

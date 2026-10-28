@@ -5,6 +5,7 @@ import { runAgent, type DriverOptions, type DriverRun } from "../../src/agents/d
 import { verificationScoutDefinition } from "../../src/agents/verification-scout.js";
 import { VerificationAnalysisStore } from "../../src/agents/verification-analysis.js";
 import { workflowPreflightContext } from "../../src/agents/workflow-facts.js";
+import { workflowSkillPath } from "../../src/agents/workflow-skills.js";
 import { LocalDependencyRegistry } from "../../src/agents/dep-registry.js";
 import { createDependencyMcpServer } from "../../src/agents/dep-registry-server.js";
 import { probeHost } from "../../src/runtime/host-preflight.js";
@@ -65,7 +66,7 @@ export async function runScoutSession(
   const host = probeHost(repo);
   const project = detectCProject(repo);
   const definition = verificationScoutDefinition("dep-registry", `Task under test:\n${request.task}\n\n${workflowPreflightContext(host, project)}`);
-  const skillPath = resolve(import.meta.dir, "../../.claude/plugins/workflow-spec/skills/verification-scout/SKILL.md");
+  const skillPath = workflowSkillPath("verification-scout");
   const skill = readFileSync(skillPath, "utf8");
   // AgentDefinition.skills preloads content for subagents. The main-session
   // options.skills only filters discovery, so preload the same bytes explicitly

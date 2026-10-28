@@ -1,6 +1,6 @@
 # Behavior-Preserving Refactoring Agent：项目现状与后续路线
 
-> 文档日期：2026-10-22（§1–§11 为当前状态；带日期的验证记录对应各自里程碑，历史架构见文末附录）
+> 文档日期：2026-10-27（§1–§11 为当前状态；带日期的验证记录对应各自里程碑，历史架构见文末附录）
 >
 > 当前定位：面向 C 代码的行为保持型重构原型。闭环已在 Windows + MinGW + Claude Agent SDK 环境完成真实端到端验证（含首个 `ACCEPTED`）；已补齐 Windows/Linux 工程检查与 CI 配置，并统一进程超时、取消和回收。验证记录见 §8.5–§8.6，平台级宿主隔离仍待实现。
 
@@ -668,6 +668,70 @@ Linux/macOS、writer 组合/完整流程及完整 `bun run check` 尚未运行�
 推送目标为 `origin/codex/verification-strategies`；本次不创建 PR 或合并主分支。
 临时 PR 文案和 `half-week-report/0918-weekly.html` 不属于本次功能交付，保留在本地。
 提交前重新运行 `bun run typecheck` 与执行器 self-test 均通过；其余验证结果和未验证边界沿用上述各节记录。
+
+### 8.14 完整工程检查与真实 writer 局部组合验证（2026-10-26）
+
+当前功能基线为已推送的 `76ac2e9`（`codex/verification-strategies`）。
+本轮新增 `scripts/e2e-verification-authoring.ts` 和运行说明，未改生产提示词、角色或管线。
+
+- `bun run check` 完整通过：221 pass / 0 fail，36 文件、810 个断言，类型检查与执行器 self-test 通过。
+- 通过生产 `runStageFlow` 真实调用一次 test-writer，前台委托 scout 和 build-writer。
+  请求别名为 `sonnet`，三个角色响应均声明 `deepseek-v4.1-flash`，不称为 Sonnet 或异构模型测评。
+- 复用局部纯函数材料，模型选择 source-harness，登记一个辅助材料；各侧分别编译真实实现。
+  生成 17 个输入场景、53 项观测，等价重构两侧构建/测试有效且一致，状态为 `ACCEPTED`。
+- 同一套固定验证方案识别截断返回值与 capacity=1 结尾写入两个错误补丁。
+  两侧均构建成功，baseline 通过，candidate 原生程序正常退出 1、行为断言失败，状态为 `ABORTED`。
+  已复核具体错误输出；不是编译/超时等基础设施失败，也不是比较阶段的 `REJECTED`。
+- 零模型复跑三份补丁结果一致，workflow 与辅助材料哈希不变；未为错误补丁补写或弱化生成的测试。
+  新脚本最终版本类型检查通过，支持独立控制检查和固定方案复跑，输出目录不覆盖历史证据。
+
+完整检查证据为 `runs/check-20261026-win.txt`；真实与复跑证据为
+`runs/writer-live-20261026-a/`、`runs/writer-replay-20261026-a/`。
+具体命令、判定分类、源码与输出复核见 [`docs/testset/07-writer-integration.md`](docs/testset/07-writer-integration.md)。
+
+已证明局部方案在真实 scout/writer 交接后可运行，且能挡住两个预设错误。
+仍未验证共享库组合、真实 refactor 模型或本轮 Linux/macOS；生成测试存在少量调查到但未落实的边界输入，
+会话也做了不必要的 Vulkan 安装搜索。这些留作后续改进，不将单个场景扩大为完整模型能力验收。
+本轮改动尚未提交或推送。
+
+### 8.15 scout 调查边界与 skill 来源修正（2026-10-27）
+
+针对 §8.14 中重复源码调查、无关 Vulkan 安装搜索与旧 skill 混用，修改角色提示和 skill：
+
+- test-writer 在读取项目源码前先查配方摘要、委托 scout；接受报告后按需读取接口并编写测试。
+- scout 根据源码判断现有产物/测试的可观察性与覆盖缺口，追清相关依赖与关键错误路径后提交。
+  所选方案的构建条件由 build-writer 实测，未选方案的环境条件不阻塞报告；关键源码契约缺失仍使用 `undetermined`。
+- 工具链、SDK 和配置问题由 build-writer 处理；只把影响覆盖判断的源码疑问交回 scout。
+- `workflow-skills.ts` 为 SDK 插件加载、三个角色的绝对 skill 路径及独立 scout 评测提供同一来源，
+  引用文档从该 skill 目录解析；路径不可读时报告具体阻碍，不搜索其他安装副本。
+
+本轮未修改顶层阶段或 baseline/candidate 构建、材料分发与比较逻辑。
+`bun run typecheck`、四个相关测试文件（31 pass / 0 fail，165 个断言）及 `git diff --check` 通过。
+新增一项交接检查：被测仓库存在旧 skill 时，三个角色仍收到当前宿主 plugin 的可读绝对路径，旧文件保持原样。
+测试使用注入 runner 和本地模拟评分，没有调用真实模型；尚未验证实际调查轨迹改善或耗时收益。
+本轮改动尚未提交或推送。
+
+### 8.16 调查质量与时间真实复测（2026-10-27）
+
+在 §8.15 修改后的实现上，请求 `sonnet` 别名，实际成功响应均声明 `deepseek-v4.1-flash`。
+进行了两次独立的局部 scout/writer 组合编写，以及已有测试、分配器依赖链、缺失 provider 三个独立 scout 场景。
+本次未调用 refactor 或裁判模型；独立场景的调度器状态为 `pending-rubric`，质量结论来自逐项源码与 reference 复核。
+
+- 两次组合都在读取项目源码前委托 scout，使用宿主当前 plugin 路径，没有 SDK 安装目录搜索或搜索超时。
+  但 writer 收到报告后仍重复读取 5/4 个项目文件；B 报告仍以无 library target 否定库消费者，并把不需要的 Vulkan 写进待办。
+- 两次组合均选择合理的 source-harness，等价控制为 `ACCEPTED`；两个错误控制均构建成功、baseline 通过，
+  candidate 在实际行为断言失败后 `ABORTED`。未进入负样本跨侧比较，不能记为 `REJECTED`。
+- writer 会话分别 260.7/331.0 秒，历史同场景为 391.7 秒；scout 委托 42.7/63.0 秒，历史为 115.5 秒。
+  端到端等价链路为 304.3/371.4 秒，历史为 401.8 秒；当前宿主验证 35–38 秒，历史为 7.5 秒，收益存在波动。
+- 三个独立 scout 分别选择 reuse-existing、library-consumer、undetermined，源码/依赖/错误路径的关键判断合理，
+  没有因停止规则而漏掉分配器失败接缝或缺失配置。其入口耗时 126.7/113.9/103.4 秒，历史成功样本约 39 秒；
+  时间主要位于读完源码到报告提交之间，当前记录不能拆分模型计算、生成和服务等待，不能宣称所有场景都更快。
+- 新生成测试补上零容量非 NULL 目标，但高位字节、早期 NUL、前置哨兵与字符串字面量源的覆盖在不同方案间有增有减，
+  不能用控制通过或期望数量证明覆盖稳定。尚未实跑共享库、真实 refactor 模型及 Linux/macOS。
+
+详细证据为本地 `runs/investigation-20261027-a/report.md`、输入快照、`metrics.json` 和 `source-review.json`；
+原始运行见 `runs/writer-live-20261027-a/`、`runs/writer-live-20261027-b/`、`runs/scout-review-20261027-a/`。
+运行期间生产提示词、skill 和执行器内容保持不变；模型进程已结束。本轮结果尚未提交或推送。
 
 ## 9. 已知限制与风险
 

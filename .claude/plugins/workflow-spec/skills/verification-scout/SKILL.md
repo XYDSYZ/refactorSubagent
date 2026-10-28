@@ -2,16 +2,17 @@
 name: verification-scout
 user-invocable: false
 description: >-
-  Source investigation for verification-scout: recommend verification scope,
-  classify dependencies, identify safe isolation seams, and report evidence,
-  meaningful observations, coverage limits and unresolved questions before
-  test-writer designs cases. Also use for targeted source follow-ups after a
-  concrete build blocker. Workflow authoring and artifact usage belong to the writers.
+  Source investigation for verification-scout: assess whether existing artifacts
+  and tests expose the required behavior, recommend verification scope and
+  dependency treatment, and report coverage gaps before test-writer designs cases.
+  Revisit for a specific unresolved source question. Build feasibility and artifact
+  usage belong to build-writer.
 ---
 
 # 验证调查
 
-你负责调查源码并提出建议。test-writer 决定最终方案并编写用例/辅助代码；
+你负责通过源码判断目标行为能否被现有产物或测试充分观察，以及需要补充哪种验证范围。
+test-writer 决定最终方案并编写用例/辅助代码；
 build-writer 实测构建，交付产物路径和完整使用说明。
 本 skill 不要求你学习 Workflow TypeScript 接口或编写构建、测试和 mock 代码。
 
@@ -19,17 +20,30 @@ build-writer 实测构建，交付产物路径和完整使用说明。
 
 1. 从原始任务确认被测符号、实现位置和需要保持的行为。跟踪相关调用、状态和错误路径，
    直到能够解释输入影响哪些输出、内存/缓冲区修改、指针偏移或状态变化；仅列函数名不算完成。
-2. 查看相关测试、头文件、构建声明和已登记配方摘要，识别已有覆盖与依赖。
-   只围绕本次行为展开；读到目录或构建目标名称不等于确认覆盖。
-3. 为每项相关依赖决定处置方式，并说明依据。需要运行才能确定的事实列为待实测，
-   交给 build-writer；源码调查只能确认源码事实。
+2. 查看相关调用入口、测试、头文件、构建声明和已登记配方摘要，判断现有产物/测试
+   能观察哪些行为、遗漏哪些关键输出或状态。只围绕本次行为展开；目录或目标名称不能证明覆盖。
+3. 沿相关源码追清依赖契约和隔离接入点，为每项依赖提出处置建议。
+   构建声明用于理解模块组成、宏和链接关系；依赖安装位置、工具链与本机构建可行性由
+   build-writer 调查。需要运行确认的条件列为待实测，不能用宿主文件搜索代替构建验证。
 4. 按下文选择可靠范围，给出必须观察的行为、备选方案及覆盖限制。
-   如果缺少决定性证据，明确选择 `undetermined`，列出能推进决策的具体问题。
+   关键行为、依赖契约或隔离接入点缺少决定性源码证据时，选择 `undetermined`，列出具体问题。
 5. 调用 `submitVerificationAnalysis`，按工具 schema 提交精简报告；被拒绝时根据错误修正。
    完成条件是宿主接受报告。向 test-writer 返回接受后的报告与保存路径，保留所有行动结论，
    搜索日志和已放弃的探索留在子会话中。
 
-再次受委托时，只补查明确阻碍，再提交包含前次有效结论的完整替换报告。
+再次受委托时，只补查影响覆盖判断的具体源码疑问，再提交包含前次有效结论的完整替换报告。
+
+## 调查完成与未知项
+
+目标行为和关键错误路径、现有入口的可观察范围、相关依赖处置与推荐范围的覆盖限制
+均有依据后，提交报告。报告不需要等到所选方案构建成功，更不需要查完所有备选方案。
+
+- 影响语义可靠性的未知项：继续定向读源码；契约缺失且无法确定可靠范围时保留 `undetermined`。
+- 所选范围的构建或运行条件：在 `openQuestions` 中注明由 build-writer 实测，保留已有源码结论。
+- 未选方案的环境条件：必要时记入 `limitations`，结束这条调查，不搜索宿主安装目录。
+
+例如局部函数不依赖 Vulkan，真实源码 harness 已能覆盖其行为时，可以记录未验证完整应用集成；
+完整应用的 Vulkan SDK 是否安装不影响该源码建议，无需追查。
 
 ## 选择范围
 

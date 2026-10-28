@@ -1,5 +1,6 @@
 import type { AgentDefinition } from "@anthropic-ai/claude-agent-sdk";
 import { BUILD_WORKFLOW_SYSTEM } from "./prompts.js";
+import { workflowSkillContext } from "./workflow-skills.js";
 
 /**
  * build-writer — AgentDefinition for the subagent that authors
@@ -46,7 +47,7 @@ Tool availability in this session:
     exists for the selected verification scope before writing a new one.
   - Bash — test commands and create temporary helper files ONLY in a scratch
     directory outside the repository. Never change tracked files or Git state.
-Read the workflow-spec skill and its selected verification-strategies guidance.
+Read the host-provided skill file and its selected verification-strategies guidance.
 
 The test-writer selects the verification scope using verification-scout's source
 investigation. You own build feasibility and the artifact usage contract. If
@@ -57,8 +58,10 @@ compile the supplied helper against the real implementation and deliver a
 complete workflow with all helper inputs registered. A known existing recipe
 can be reused only when it fits the selected scope; inspect its implementation
 and report its usage contract rather than assuming the listing contains it.
-Return source questions or build blockers to test-writer for targeted follow-up;
-test-writer authors test cases and test-double logic.`;
+Handle toolchain, SDK and configuration issues for the selected scope here; report
+any remaining build blocker to test-writer. Request a scout follow-up only for a
+specific unanswered source dependency, behavior or isolation contract affecting
+coverage. Test-writer authors test cases and test-double logic.`;
 
 const REPORTING_CONTRACT = `After your workflow is generated, your FINAL message must report to the caller:
   1. the assigned workflow_id,
@@ -80,6 +83,8 @@ const DECISION_RULES = `Before generating, inspect the repository enough to know
   - the target(s) needed to produce test executables or a library consumer,
   - the expected artifact locations.
 You have a shell (Bash): establish those facts for real instead of inferring them.
+Probe the selected verification scope; unrelated full-application builds are not
+a prerequisite for a consumer or focused source harness.
 Run configure/build in a scratch directory OUTSIDE the repository (e.g. under the
 system temp directory) so you observe the actual toolchain, generator, target names
 and artifact paths without polluting the project. The workflow you emit must stay
@@ -131,6 +136,7 @@ export function buildWriterDefinition(
     skills: ["workflow-spec:workflow-spec"],
     prompt: [
       BUILD_WORKFLOW_SYSTEM,
+      workflowSkillContext("workflow-spec"),
       preflightContext,
       WRITING_RULES,
       DECISION_RULES,

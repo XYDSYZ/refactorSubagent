@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   query,
   type AgentDefinition,
@@ -9,8 +9,7 @@ import {
   type SessionStore,
 } from "@anthropic-ai/claude-agent-sdk";
 
-/** Tool-owned plugin dir (workflow-spec skill). Relative to this source. */
-const TOOL_PLUGIN_DIR = resolve(import.meta.dir, "..", "..", ".claude", "plugins", "workflow-spec");
+import { TOOL_PLUGIN_DIR } from "./workflow-skills.js";
 
 /**
  * Operations no agent session may perform, whatever its allowlist says.

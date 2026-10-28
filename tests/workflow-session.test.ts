@@ -1,8 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import type { AgentDefinition, McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type { HostPreflight, ProjectDetection } from "../src/artifacts/index.js";
 import { DEFAULT_LIMITS, type SessionLimits } from "../src/config/limits.js";
 import {
@@ -159,6 +159,27 @@ describe("runWorkflowSession", () => {
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__generateBuildWorkflow");
     expect(o!.extraAllowedTools).toContain("mcp__dep-registry__submitVerificationAnalysis");
     expect(o!.skills).toContain("workflow-spec:workflow-spec");
+  });
+
+  test("anchors every authoring role to the host plugin when the tested repo has a stale skill", async () => {
+    const h = makeSessionHarness({ writeTestEntry: true });
+    const staleSkill = join(h.repoDir, ".claude", "skills", "workflow-spec", "SKILL.md");
+    mkdirSync(join(staleSkill, ".."), { recursive: true });
+    writeFileSync(staleSkill, "outdated workflow guidance");
+    await h.run();
+    const o = h.captured()!;
+    const roles = [
+      { prompt: o.prompt, skill: "workflow-spec" },
+      { prompt: (o.agents["build-writer"] as AgentDefinition).prompt, skill: "workflow-spec" },
+      { prompt: (o.agents["verification-scout"] as AgentDefinition).prompt, skill: "verification-scout" },
+    ];
+    for (const role of roles) {
+      const entry = resolve(import.meta.dir, "..", ".claude", "plugins", "workflow-spec", "skills", role.skill, "SKILL.md");
+      expect(role.prompt).toContain(entry.split("\\").join("/"));
+      expect(readFileSync(entry, "utf8")).toContain(`name: ${role.skill}`);
+      expect(role.prompt).not.toContain(staleSkill.split("\\").join("/"));
+    }
+    expect(readFileSync(staleSkill, "utf8")).toBe("outdated workflow guidance");
   });
 
   test("session model from limits reaches the agent runner", async () => {

@@ -12,6 +12,7 @@ import { DEFAULT_LIMITS, type SessionLimits } from "../config/limits.js";
 import { workflowPreflightContext } from "./workflow-facts.js";
 import { VerificationAnalysisStore } from "./verification-analysis.js";
 import { verificationScoutDefinition } from "./verification-scout.js";
+import { workflowSkillContext } from "./workflow-skills.js";
 
 /**
  * workflow-session — orchestrates a test-writer Claude session that produces
@@ -110,12 +111,14 @@ ${task}
 
 ${preflight}
 
-Read the workflow-spec skill. Delegate source investigation to verification-scout
-before designing tests; it has its own focused skill and receives these preflight
-facts and the original task. You own the final strategy and concrete test cases.
-Use the scout's conclusions rather than repeating its full repository exploration;
-read individual interfaces as needed to write correct tests. Read the selected
-workflow-spec implementation guidance, including verification-strategies.md.
+${workflowSkillContext("workflow-spec")}
+
+Start with recipe inspection and scout delegation before reading project source
+or designing tests. The scout has its own focused skill and already receives the
+original task and these preflight facts. You own the final strategy and concrete
+cases; after its report, read individual interfaces or implementation details
+needed to write correct tests. Read the selected implementation guidance,
+including verification-strategies.md, from the skill directory above.
 
 You must produce THREE deliverables before the session ends:
   1. A source investigation report, accepted by submitVerificationAnalysis. The
@@ -136,16 +139,20 @@ Workflow of the session:
   1. Call inspectWorkflow (kind: "build") to see what build workflows exist:
      library entries (status library-verified/library-draft, with descriptions)
      and entries generated earlier this run (status run-local).
-  2. Invoke verification-scout via Task with the behavior to verify, constraints,
-     available recipe summaries, and any specific unresolved question. It
-     investigates implementation semantics and dependencies, recommends a scope
-     and dependency treatment, and submits its report. It does not supply
-     artifact usage instructions. WAIT for its accepted report.
+  2. Invoke verification-scout via Task with a concise source investigation request,
+     recipe summaries, and any additional behavior constraints or unresolved
+     source question. It already has the task and preflight context. Ask whether
+     existing artifacts/tests can expose the required behavior comprehensively,
+     what coverage is missing, and which scope/dependency treatment fits. Host
+     SDK/toolchain discovery and build success belong to build-writer. WAIT for
+     the scout's accepted report before inspecting source to author tests.
   3. Select a reliable scope from that report: relevant existing tests, a library
      consumer, a focused real-source harness, or a combination. Reliability and
      semantic coverage come before cost; a focused harness does not require an
-     expensive full build to be justified. Resolve critical unknowns with
-     targeted follow-ups or stop if no reliable scope can be established.
+     expensive full build to be justified. Return critical semantic or dependency
+     questions to scout; send selected-scope build/runtime feasibility questions
+     to build-writer. Conditions for an unselected alternative need not be resolved.
+     Stop if no semantically reliable scope can be established.
   4. Delegate construction to build-writer when a new build is needed or an
      existing recipe's artifact usage is unclear. Supply the selected scope,
      scout report, required real implementation, and auxiliary source content.
@@ -167,10 +174,12 @@ Workflow of the session:
        Compile each side's real implementation, without copying that code into
        helpers. The host pins materials and distributes identical bytes to both
        worktrees only after the candidate patch is committed.
-     - A concrete build blocker can justify a targeted scout follow-up and a
-       revised strategy during authoring. Explain the change and have the scout
-       update the report. Preserve the frozen test and materials during later
-       verification; a candidate failure is not a reason to weaken them.
+     - Build-writer handles toolchain, SDK and configuration problems for the
+       selected scope. Ask scout a targeted follow-up only if the blocker exposes
+       an unresolved source dependency, behavior or isolation contract. If its
+       recommendation changes, have it update the report. Preserve frozen tests
+       and materials during later verification; a candidate failure is not a
+       reason to weaken them.
      Run every delegated agent in the FOREGROUND (run_in_background: false).
      WAIT for one report before dispatching the next agent or finishing.
   5. Call declareDependency with the final complete set.
@@ -197,8 +206,9 @@ state - the host owns the worktrees. Probe builds must happen OUTSIDE the repo
 the repo becomes part of the run.
 
 If the build-writer reports a failure or the generated workflow is rejected,
-use the concrete blocker for a targeted follow-up and have build-writer confirm
-the revised scope or a suitable existing recipe. If no reliable build can be
+have build-writer address the concrete build or validation error. Revisit scout
+only for an unanswered source question affecting coverage, then have build-writer
+confirm the revised scope or a suitable existing recipe. If no reliable build can be
 established, stop and explain what is missing — the host will fail the session
 rather than run a broken test.
 
