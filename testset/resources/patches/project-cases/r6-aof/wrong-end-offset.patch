@@ -1,0 +1,11 @@
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -130,7 +130,7 @@
+     if (ai->start_offset != -1) {
+         ret = sdscatprintf(ret, " %s %lld", AOF_MANIFEST_KEY_FILE_STARTOFFSET, ai->start_offset);
+         if (ai->end_offset != -1) {
+-            ret = sdscatprintf(ret, " %s %lld", AOF_MANIFEST_KEY_FILE_ENDOFFSET, ai->end_offset);
++            ret = sdscatprintf(ret, " %s %lld", AOF_MANIFEST_KEY_FILE_ENDOFFSET, ai->start_offset);
+         }
+     }
+ 

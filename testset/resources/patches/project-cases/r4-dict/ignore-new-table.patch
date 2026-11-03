@@ -1,0 +1,11 @@
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -1760,7 +1760,7 @@
+     _dictExpandIfNeeded(d);
+     keyCmpFunc cmpFunc = dictGetCmpFunc(d);
+ 
+-    for (table = 0; table <= 1; table++) {
++    for (table = 0; table < 1; table++) {
+         if (table == 0 && (long)idx < d->rehashidx) continue; 
+         idx = hash & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
+         /* Search if this slot does not already contain the given key */

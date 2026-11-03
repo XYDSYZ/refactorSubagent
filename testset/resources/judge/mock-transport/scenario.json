@@ -1,0 +1,17 @@
+{
+  "id": "mock-transport",
+  "project": "mock-transport",
+  "service": false,
+  "checks": 17,
+  "sources": [
+    "src/frame_client.c"
+  ],
+  "upstreamSources": [
+    "src/frame_client.c"
+  ],
+  "protectedFiles": {
+    "include/frame_client.h": "6aeb419bbb9a019dc1660822e0637d0eb697daf525f46754a909472a90145890",
+    "include/transport.h": "815da55da21db8b4bcc69c19354d688aff497acb45fd44ba0fc2201c2ef4b4c8",
+    "README.md": "4c134923556cc1488828b2eeb6ae6c1638a6103f12a3438bcfd7b2b297711260"
+  }
+}

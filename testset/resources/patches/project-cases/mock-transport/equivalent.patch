@@ -1,0 +1,105 @@
+--- a/src/frame_client.c
++++ b/src/frame_client.c
+@@ -1,5 +1,6 @@
+ #include "frame_client.h"
+ #include "transport.h"
++#include "frame_io.h"
+ #include <stdint.h>
+ #include <string.h>
+ 
+@@ -12,7 +13,7 @@
+ int frame_fetch(const char *endpoint, unsigned char id, unsigned char *output,
+                 size_t capacity, size_t *output_size, unsigned timeout_ms) {
+     unsigned char request[2] = {0xa5, id}, header[4], payload[257];
+-    size_t sent = 0, received = 0, payload_size;
++    size_t payload_size;
+     int result = FRAME_IO;
+     uint64_t began;
+     transport *connection;
+@@ -21,41 +22,16 @@
+     if (!connection) return FRAME_CONNECT;
+     began = transport_now_ms();
+ 
+-    while (sent < sizeof request) {
+-        uint64_t elapsed = transport_now_ms() - began;
+-        long n;
+-        if (elapsed >= timeout_ms) { result = FRAME_TIMEOUT; goto finish; }
+-        n = transport_write(connection, request + sent, sizeof request - sent,
+-                            timeout_ms - (unsigned)elapsed);
+-        if (n == -2) continue;
+-        if (n <= 0 || (size_t)n > sizeof request - sent) goto finish;
+-        sent += (size_t)n;
+-    }
+-    while (received < sizeof header) {
+-        uint64_t elapsed = transport_now_ms() - began;
+-        long n;
+-        if (elapsed >= timeout_ms) { result = FRAME_TIMEOUT; goto finish; }
+-        n = transport_read(connection, header + received, sizeof header - received,
+-                           timeout_ms - (unsigned)elapsed);
+-        if (n == -2) continue;
+-        if (n <= 0 || (size_t)n > sizeof header - received) goto finish;
+-        received += (size_t)n;
+-    }
++    result = frame_transfer_exact(connection, 1, request, sizeof request, began, timeout_ms);
++    if (result != FRAME_OK) goto finish;
++    result = frame_transfer_exact(connection, 0, header, sizeof header, began, timeout_ms);
++    if (result != FRAME_OK) goto finish;
+     if (header[0] != 0x5a || header[1] != id) { result = FRAME_PROTOCOL; goto finish; }
+     payload_size = ((size_t)header[2] << 8) | header[3];
+     if (payload_size > 256) { result = FRAME_PROTOCOL; goto finish; }
+     if (payload_size > capacity) { result = FRAME_CAPACITY; goto finish; }
+-    received = 0;
+-    while (received < payload_size + 1) {
+-        uint64_t elapsed = transport_now_ms() - began;
+-        long n;
+-        if (elapsed >= timeout_ms) { result = FRAME_TIMEOUT; goto finish; }
+-        n = transport_read(connection, payload + received, payload_size + 1 - received,
+-                           timeout_ms - (unsigned)elapsed);
+-        if (n == -2) continue;
+-        if (n <= 0 || (size_t)n > payload_size + 1 - received) goto finish;
+-        received += (size_t)n;
+-    }
++    result = frame_transfer_exact(connection, 0, payload, payload_size + 1, began, timeout_ms);
++    if (result != FRAME_OK) goto finish;
+     if ((frame_checksum(header, sizeof header) ^ frame_checksum(payload, payload_size)) != payload[payload_size]) {
+         result = FRAME_PROTOCOL;
+         goto finish;
+--- /dev/null
++++ b/src/frame_io.h
+@@ -0,0 +1,5 @@
++#ifndef FRAME_IO_H
++#define FRAME_IO_H
++#include "transport.h"
++int frame_transfer_exact(transport *, int, unsigned char *, size_t, uint64_t, unsigned);
++#endif
+--- /dev/null
++++ b/src/frame_io.c
+@@ -0,0 +1,18 @@
++#include "frame_client.h"
++#include "frame_io.h"
++int frame_transfer_exact(transport *connection, int writing, unsigned char *data,
++                          size_t wanted, uint64_t began, unsigned timeout_ms) {
++    size_t offset = 0;
++    while (offset < wanted) {
++        uint64_t elapsed = transport_now_ms() - began;
++        long n;
++        if (elapsed >= timeout_ms) return FRAME_TIMEOUT;
++        n = writing ? transport_write(connection, data + offset, wanted - offset, timeout_ms - (unsigned)elapsed)
++                    : transport_read(connection, data + offset, wanted - offset, timeout_ms - (unsigned)elapsed);
++        if (n == -2) continue;
++        if (n <= 0 || (size_t)n > wanted - offset) return FRAME_IO;
++        offset += (size_t)n;
++    }
++    return FRAME_OK;
++}
++
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,6 +1,6 @@
+ cmake_minimum_required(VERSION 3.20)
+ project(frame_device C)
+ find_package(DeviceSDK 4 REQUIRED CONFIG)
+-add_library(frame_client STATIC src/frame_client.c)
++add_library(frame_client STATIC src/frame_client.c src/frame_io.c)
+ target_include_directories(frame_client PUBLIC include)
+ target_link_libraries(frame_client PRIVATE DeviceSDK::Transport)

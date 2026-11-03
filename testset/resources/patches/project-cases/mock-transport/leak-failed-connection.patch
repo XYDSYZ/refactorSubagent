@@ -1,0 +1,10 @@
+--- a/src/frame_client.c
++++ b/src/frame_client.c
+@@ -64,6 +64,6 @@
+     *output_size = payload_size;
+     result = FRAME_OK;
+ finish:
+-    transport_close(connection);
++    if (result == FRAME_OK) transport_close(connection);
+     return result;
+ }

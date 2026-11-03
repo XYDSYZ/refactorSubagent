@@ -1,0 +1,61 @@
+--- a/src/t_string.c
++++ b/src/t_string.c
+@@ -298,6 +298,10 @@
+  * EX/EXAT/PX/PXAT arguments. Unit is updated to millisecond if PX/PXAT is set.
+  * match_value is updated if any of IFEQ/IFNE/IFDEQ/IFDNE is set.
+  */
++static int setOptionConflicts(int flags, int choice, int exclusive) {
++    return flags & (exclusive & ~choice);
++}
++
+ int parseExtendedStringArgumentsOrReply(client *c, int start_pos, extendedStringArgs *args, int command_type) {
+     /* Initialize arguments to defaults */
+     memset(args, 0, sizeof(*args));
+@@ -322,12 +326,12 @@
+ 
+         if ((opt[0] == 'n' || opt[0] == 'N') &&
+             (opt[1] == 'x' || opt[1] == 'X') && opt[2] == '\0' &&
+-            !(args->flags & (cond_mut_excl & ~OBJ_SET_NX)) && (command_type == COMMAND_SET || command_type == COMMAND_MSETEX))
++            !setOptionConflicts(args->flags, OBJ_SET_NX, cond_mut_excl) && (command_type == COMMAND_SET || command_type == COMMAND_MSETEX))
+         {
+             args->flags |= OBJ_SET_NX;
+         } else if ((opt[0] == 'x' || opt[0] == 'X') &&
+                    (opt[1] == 'x' || opt[1] == 'X') && opt[2] == '\0' &&
+-                   !(args->flags & (cond_mut_excl & ~OBJ_SET_XX)) && (command_type == COMMAND_SET || command_type == COMMAND_MSETEX))
++                   !setOptionConflicts(args->flags, OBJ_SET_XX, cond_mut_excl) && (command_type == COMMAND_SET || command_type == COMMAND_MSETEX))
+         {
+             args->flags |= OBJ_SET_XX;
+         } else if ((opt[0] == 'g' || opt[0] == 'G') &&
+@@ -393,28 +397,28 @@
+             args->expire = next;
+             j++;
+         } else if (!strcasecmp(opt, "ifeq") && next &&
+-                   !(args->flags & (cond_mut_excl & ~OBJ_SET_IFEQ)) &&
++                   !setOptionConflicts(args->flags, OBJ_SET_IFEQ, cond_mut_excl) &&
+                    (command_type == COMMAND_SET))
+         {
+             args->flags |= OBJ_SET_IFEQ;
+             args->match_value = next;
+             j++;
+         } else if (!strcasecmp(opt, "ifne") && next &&
+-                   !(args->flags & (cond_mut_excl & ~OBJ_SET_IFNE)) &&
++                   !setOptionConflicts(args->flags, OBJ_SET_IFNE, cond_mut_excl) &&
+                    (command_type == COMMAND_SET))
+         {
+             args->flags |= OBJ_SET_IFNE;
+             args->match_value = next;
+             j++;
+         } else if (!strcasecmp(opt, "ifdeq") && next &&
+-                   !(args->flags & (cond_mut_excl & ~OBJ_SET_IFDEQ)) &&
++                   !setOptionConflicts(args->flags, OBJ_SET_IFDEQ, cond_mut_excl) &&
+                    (command_type == COMMAND_SET))
+         {
+             args->flags |= OBJ_SET_IFDEQ;
+             args->match_value = next;
+             j++;
+         } else if (!strcasecmp(opt, "ifdne") && next &&
+-                   !(args->flags & (cond_mut_excl & ~OBJ_SET_IFDNE)) &&
++                   !setOptionConflicts(args->flags, OBJ_SET_IFDNE, cond_mut_excl) &&
+                    (command_type == COMMAND_SET))
+         {
+             args->flags |= OBJ_SET_IFDNE;

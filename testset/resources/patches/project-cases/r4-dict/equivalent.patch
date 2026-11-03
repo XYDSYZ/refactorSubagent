@@ -1,0 +1,37 @@
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -1745,6 +1745,16 @@
+  * be inserted using dictInsertKeyAtLink() if the key does not already exist in
+  * the dict. If the key exists in the dict, NULL is returned and the optional
+  * 'existing' entry pointer is populated, if provided. */
++static dictEntry *dictExistingInBucket(dict *d, dictEntry *he, const void *key,
++                                      keyCmpFunc cmp, dictCmpCache *cache) {
++    while (he) {
++        const void *stored = dictStoredKey2Key(d, dictGetKey(he));
++        if (key == stored || cmp(cache, key, stored)) return he;
++        he = dictGetNext(he);
++    }
++    return NULL;
++}
++
+ dictEntryLink dictFindLinkForInsert(dict *d, const void *key, dictEntry **existing) {
+     unsigned long idx, table;
+     dictCmpCache cmpCache = {0};
+@@ -1765,13 +1775,10 @@
+         idx = hash & DICTHT_SIZE_MASK(d->ht_size_exp[table]);
+         /* Search if this slot does not already contain the given key */
+         he = d->ht_table[table][idx];
+-        while(he) {
+-            const void *he_key = dictStoredKey2Key(d, dictGetKey(he));            
+-            if (key == he_key || cmpFunc(&cmpCache, key, he_key)) {
+-                if (existing) *existing = he;
+-                return NULL;
+-            }
+-            he = dictGetNext(he);
++        he = dictExistingInBucket(d,he,key,cmpFunc,&cmpCache);
++        if (he) {
++            if (existing) *existing = he;
++            return NULL;
+         }
+         if (!dictIsRehashing(d)) break;
+     }

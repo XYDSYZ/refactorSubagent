@@ -1,0 +1,40 @@
+{
+  "case": "e2e-mock-transport",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/mock-transport/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "把三段收发循环提取到新 C 文件并维护 CMake"
+    },
+    {
+      "id": "repeat-write-prefix",
+      "patch": "resources/patches/project-cases/mock-transport/repeat-write-prefix.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "partial-io-with-retries"
+      ],
+      "description": "分段发送时重复首字节"
+    },
+    {
+      "id": "skip-checksum",
+      "patch": "resources/patches/project-cases/mock-transport/skip-checksum.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "checksum-output-atomicity"
+      ],
+      "description": "忽略响应校验和"
+    },
+    {
+      "id": "leak-failed-connection",
+      "patch": "resources/patches/project-cases/mock-transport/leak-failed-connection.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "fatal-read-cleanup",
+        "retry-deadline-cleanup"
+      ],
+      "description": "错误路径泄漏连接"
+    }
+  ]
+}

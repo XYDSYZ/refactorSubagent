@@ -76,6 +76,11 @@ export function evaluatePipeline(
   }
 
   const summary = run.summary;
+  if (c.verification) {
+    const verification = run.independentVerification;
+    checks.push(check("independent-verification", verification?.status === "passed",
+      verification?.detail ?? "required independent verification evidence is missing"));
+  }
   checks.push(check("exit-code", run.exitCode === expectedExit,
     `exit=${String(run.exitCode)} expected=${String(expectedExit)} (state ${String(expect.state)})`));
 
@@ -167,6 +172,7 @@ export function evaluatePipeline(
       candidateBuild: summary?.candidate_build ?? null,
       session: run.sessionId,
       logDir: run.logDir,
+      ...(c.verification ? { independentVerification: run.independentVerification ?? null } : {}),
     },
     rubric: rubricOutcome,
   };

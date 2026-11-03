@@ -1,0 +1,10 @@
+--- a/src/t_string.c
++++ b/src/t_string.c
+@@ -425,6 +425,7 @@
+             return C_ERR;
+         }
+     }
++    if (args->flags & OBJ_SET_XX) args->flags &= ~OBJ_SET_GET;
+     return C_OK;
+ }
+ 

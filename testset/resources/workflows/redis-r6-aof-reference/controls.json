@@ -1,0 +1,31 @@
+{
+  "case": "e2e-redis-r6-aof",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r6-aof/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取文件名表示生成"
+    },
+    {
+      "id": "unescaped-filename",
+      "patch": "resources/patches/project-cases/r6-aof/unescaped-filename.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "manifest-space",
+        "manifest-quote"
+      ],
+      "description": "清单文件名不再转义"
+    },
+    {
+      "id": "wrong-end-offset",
+      "patch": "resources/patches/project-cases/r6-aof/wrong-end-offset.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "manifest-end"
+      ],
+      "description": "结束偏移被写成开始偏移"
+    }
+  ]
+}

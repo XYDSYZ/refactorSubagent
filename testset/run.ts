@@ -186,7 +186,7 @@ interface CaseOutcome {
 
 /** Names the runner writes into a case result directory; anything else means the directory is not ours to erase. */
 const RUNNER_OUTPUTS = [
-  "env", "session", "prepare.json", "pipeline.json", "part-result.json",
+  "env", "session", "independent", "prepare.json", "pipeline.json", "part-result.json",
   "run-result.json", "harness.stdout.txt", "harness.stderr.txt",
   "rubric-prompt.md", "rubric.stdout.txt", "rubric.stderr.txt", "rubric.json",
   "prepare.stdout.txt", "prepare.stderr.txt",
@@ -240,6 +240,7 @@ async function rubricFor(
     caseId: c.id,
     caseDir,
     sessionRoot: run.sessionRoot,
+    repoDir: run.repoDir,
     sessionId: run.sessionId,
     rubricPath: c.expect.rubric?.rubric ?? "",
     referencePath: c.expect.rubric?.reference ?? null,
@@ -312,6 +313,7 @@ async function executeCase(c: SuiteCase, ctx: JobContext, options: Options): Pro
     pipelinePath: run.pipelinePath,
     harnessPhase: run.harnessPhase,
     error: run.error,
+    independentVerification: run.independentVerification,
   });
 
   const rubric = await rubricFor(c, options, run, caseDir, (phase, detail) => ctx.onPhase(phase, detail));
@@ -520,6 +522,13 @@ function printDryRun(suite: Suite, cases: readonly SuiteCase[], options: Options
     for (const injection of c.inject) {
       process.stdout.write(`  inject   ${injection.source} → <worktree>/${injection.dest}\n`);
     }
+    if (c.verification) {
+      process.stdout.write(`  verify   after ACCEPTED: ${JSON.stringify(c.verification.stages)}\n`);
+      process.stdout.write(`  targets  ${c.verification.changedFiles.join(",")}\n`);
+      for (const injection of c.verification.inject) {
+        process.stdout.write(`  hidden   ${injection.source} → <independent-worktree>/${injection.dest}\n`);
+      }
+    }
     for (const [key, value] of Object.entries(c.limits)) {
       process.stdout.write(`  limit    ${key}=${String(value)}\n`);
     }
@@ -614,6 +623,7 @@ async function reevaluateRun(suiteRoot: string, runDir: string, term: Term, opti
       comparisonPath: string | null;
       pipelinePath: string | null;
       error: string | null;
+      independentVerification?: PipelineRunResult["independentVerification"];
     };
     if (stored.status === "blocked") {
       const outcome = blockedOutcome(c, caseDir, stored.reason ?? "blocked");
@@ -663,6 +673,7 @@ async function reevaluateRun(suiteRoot: string, runDir: string, term: Term, opti
       harnessPhase: stored.harnessPhase ?? "unknown",
       pipelinePath: stored.pipelinePath ?? join(caseDir, "pipeline.json"),
       error: stored.error,
+      independentVerification: stored.independentVerification,
     };
     const evaluation = evaluatePipeline(c, run, { calibrate: options.calibrate }, null);
     if (evaluation.status === "failed") counts.failed++;

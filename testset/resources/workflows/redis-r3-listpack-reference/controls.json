@@ -1,0 +1,30 @@
+{
+  "case": "e2e-redis-r3-listpack",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r3-listpack/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取元素计数的头部更新逻辑"
+    },
+    {
+      "id": "wrong-count",
+      "patch": "resources/patches/project-cases/r3-listpack/wrong-count.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "append-0"
+      ],
+      "description": "插入后元素计数多一"
+    },
+    {
+      "id": "numeric-leading-zero",
+      "patch": "resources/patches/project-cases/r3-listpack/numeric-leading-zero.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "integer-boundaries"
+      ],
+      "description": "将非规范数字字符串错误整数化"
+    }
+  ]
+}

@@ -1,0 +1,11 @@
+--- a/src/listpack.c
++++ b/src/listpack.c
+@@ -166,7 +166,7 @@
+         return 0;
+ 
+     /* Special case: first and only digit is 0. */
+-    if (slen == 1 && p[0] == '0') {
++    if (slen >= 1 && p[0] == '0') {
+         if (value != NULL) *value = 0;
+         return 1;
+     }

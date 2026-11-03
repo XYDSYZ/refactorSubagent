@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(frame_device C)
+find_package(DeviceSDK 4 REQUIRED CONFIG)
+add_library(frame_client STATIC src/frame_client.c)
+target_include_directories(frame_client PUBLIC include)
+target_link_libraries(frame_client PRIVATE DeviceSDK::Transport)

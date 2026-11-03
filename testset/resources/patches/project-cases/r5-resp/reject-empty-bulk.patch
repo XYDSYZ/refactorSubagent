@@ -1,0 +1,11 @@
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -3385,7 +3385,7 @@
+ 
+             size_t bulklen_slen = newline - (c->querybuf + c->qb_pos + 1);
+             ok = string2ll(c->querybuf+c->qb_pos+1,newline-(c->querybuf+c->qb_pos+1),&ll);
+-            if (!ok || ll < 0 ||
++            if (!ok || ll <= 0 ||
+                 (!(c->flags & CLIENT_MASTER) && ll > server.proto_max_bulk_len)) {
+                 pcmd->read_error = CLIENT_READ_INVALID_BUCK_LENGTH;
+                 return C_ERR;

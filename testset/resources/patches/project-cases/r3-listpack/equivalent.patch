@@ -1,0 +1,38 @@
+--- a/src/listpack.c
++++ b/src/listpack.c
+@@ -1029,6 +1029,18 @@
+  * For deletion operations (both 'elestr' and 'eleint' set to NULL) 'newp' is
+  * set to the next element, on the right of the deleted one, or to NULL if the
+  * deleted element was the last one. */
++static void lpUpdateElementCount(unsigned char *lp, int where, int delete) {
++    if (where != LP_REPLACE || delete) {
++        uint32_t num_elements = lpGetNumElements(lp);
++        if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
++            if (!delete)
++                lpSetNumElements(lp,num_elements+1);
++            else
++                lpSetNumElements(lp,num_elements-1);
++        }
++    }
++}
++
+ unsigned char *lpInsert(unsigned char *lp, unsigned char *elestr, unsigned char *eleint,
+                         uint32_t size, unsigned char *p, int where, unsigned char **newp)
+ {
+@@ -1145,15 +1157,7 @@
+     }
+ 
+     /* Update header. */
+-    if (where != LP_REPLACE || delete) {
+-        uint32_t num_elements = lpGetNumElements(lp);
+-        if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
+-            if (!delete)
+-                lpSetNumElements(lp,num_elements+1);
+-            else
+-                lpSetNumElements(lp,num_elements-1);
+-        }
+-    }
++    lpUpdateElementCount(lp,where,delete);
+     lpSetTotalBytes(lp,new_listpack_bytes);
+ 
+ #if 0

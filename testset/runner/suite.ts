@@ -69,6 +69,12 @@ const CaseFile = z
     task: z.string().min(1).optional(),
     part: z.string().min(1).optional(),
     stages: StageFile.default({}),
+    /** Evaluator-owned replay, run only after the candidate session ends. */
+    verification: z.object({
+      resource: z.string().min(1),
+      inject: z.array(z.object({ source: z.string().min(1), dest: z.string().min(1) }).strict()),
+      changedFiles: z.array(z.string().min(1)).min(1),
+    }).strict().optional(),
     inject: z.array(z.object({ source: z.string().min(1), dest: z.string().min(1) }).strict()).default([]),
     limits: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).default({}),
     timeoutMs: z.number().int().positive().optional(),
@@ -135,6 +141,12 @@ export interface SuiteCase {
   readonly taskFile: string | null;
   /** Pipeline stages with every path already resolved (absolute). */
   readonly stages: Readonly<Record<string, Record<string, unknown>>>;
+  readonly verification?: {
+    readonly stages: Readonly<Record<string, Record<string, unknown>>>;
+    readonly inject: readonly Injection[];
+    /** At least one target must change; this does not grade refactoring quality. */
+    readonly changedFiles: readonly string[];
+  };
   readonly inject: readonly Injection[];
   readonly limits: Readonly<Record<string, string | number | null>>;
   readonly timeoutMs: number | null;
@@ -285,6 +297,9 @@ function parseCase(root: string, dir: string, problems: MaterialProblem[]): Suit
   });
 
   const expect = raw.expect;
+  if (raw.verification && (raw.kind !== "pipeline" || expect.state !== "ACCEPTED")) {
+    throw new Error(`${where}: independent verification requires an ACCEPTED pipeline case`);
+  }
   if (expect.rubric !== undefined && expect.method !== "verdict+rubric" && expect.method !== "scout+rubric") {
     throw new Error(`${where}: expect.rubric needs method 'verdict+rubric' or 'scout+rubric'`);
   }
@@ -319,6 +334,15 @@ function parseCase(root: string, dir: string, problems: MaterialProblem[]): Suit
     repo: raw.repo,
     taskFile,
     stages: resolveStages(raw.stages, root, dir, id, problems),
+    ...(raw.verification ? { verification: {
+      stages: resolveStages({ workflows: { mode: "preset", resource: raw.verification.resource } }, root, dir, id, problems),
+      inject: raw.verification.inject.map((entry) => {
+        const source = resolveResource(root, dir, entry.source);
+        if (!existsSync(source)) problems.push({ caseId: id, problem: `verification source not found: ${source}` });
+        return { source, dest: entry.dest };
+      }),
+      changedFiles: raw.verification.changedFiles,
+    } } : {}),
     inject,
     limits: raw.limits,
     timeoutMs: raw.timeoutMs ?? null,

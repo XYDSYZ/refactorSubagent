@@ -1,0 +1,30 @@
+{
+  "case": "e2e-redis-r2-set",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r2-set/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取 SET 条件互斥判断"
+    },
+    {
+      "id": "nx-as-xx",
+      "patch": "resources/patches/project-cases/r2-set/nx-as-xx.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "nx-create"
+      ],
+      "description": "NX 选项被错误识别为 XX"
+    },
+    {
+      "id": "get-ignored",
+      "patch": "resources/patches/project-cases/r2-set/get-ignored.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "xx-get-old-value"
+      ],
+      "description": "GET 与 XX 组合时丢失 GET 标志"
+    }
+  ]
+}

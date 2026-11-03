@@ -1,0 +1,11 @@
+--- a/src/sds.c
++++ b/src/sds.c
+@@ -1089,7 +1089,7 @@
+ 
+                         byte = (hex_digit_to_int(*(p+2))*16)+
+                                 hex_digit_to_int(*(p+3));
+-                        current = sdscatlen(current,(char*)&byte,1);
++                        if (byte) current = sdscatlen(current,(char*)&byte,1);
+                         p += 3;
+                     } else if (*p == '\\' && *(p+1)) {
+                         char c;

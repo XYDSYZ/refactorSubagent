@@ -1,0 +1,31 @@
+{
+  "case": "e2e-redis-r1-sds",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r1-sds/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取共享的引号结束条件"
+    },
+    {
+      "id": "drop-nul",
+      "patch": "resources/patches/project-cases/r1-sds/drop-nul.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "split-5"
+      ],
+      "description": "丢弃转义产生的 NUL 字节"
+    },
+    {
+      "id": "allow-quote-tail",
+      "patch": "resources/patches/project-cases/r1-sds/allow-quote-tail.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "invalid-2",
+        "invalid-3"
+      ],
+      "description": "错误接受闭合引号后的非空白字符"
+    }
+  ]
+}

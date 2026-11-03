@@ -1,0 +1,11 @@
+{
+  "builds": [
+    {
+      "id": "mock-transport-reference",
+      "entry": "../project-reference/build-workflow.ts"
+    }
+  ],
+  "testEntry": "../project-reference/test-workflow.ts",
+  "workflowId": "mock-transport-reference",
+  "revision": 1
+}

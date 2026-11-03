@@ -11,7 +11,7 @@
  * Nothing here decides pass/fail; that is evaluate.ts.
  */
 import { createHash } from "node:crypto";
-import { existsSync as exists, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync as exists, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import { exec, type ExecResult } from "./exec.js";
 import { readJson, writeJson } from "./util.js";
@@ -44,6 +44,7 @@ export interface HarnessSummary {
 }
 
 export interface PipelineRunResult {
+  readonly independentVerification?: IndependentVerification;
   readonly status: ExecResult["status"];
   readonly exitCode: number | null;
   readonly elapsedMs: number;
@@ -66,15 +67,25 @@ export interface PipelineRunResult {
   readonly error: string | null;
 }
 
+export interface IndependentVerification {
+  readonly status: "passed" | "failed" | "not-run";
+  readonly detail: string;
+  readonly logDir: string | null;
+  readonly changedFiles: readonly string[];
+  readonly state: string | null;
+  readonly mismatches: readonly string[];
+}
+
 /** Run the harness CLI once against a prepared environment. */
 export async function runPipelineCase(
   ctx: JobContext,
   c: SuiteCase,
   task: string,
+  options: { readonly repoDir?: string; readonly independent?: boolean } = {},
 ): Promise<PipelineRunResult> {
   const started = Date.now();
   const envDir = join(ctx.caseDir, "env");
-  const repoDir = join(envDir, c.repo);
+  const repoDir = options.repoDir ?? join(envDir, c.repo);
   const sessionRoot = join(ctx.caseDir, "session");
   let sessionId = `${c.id}-s1`;
   const pipelinePath = join(ctx.caseDir, "pipeline.json");
@@ -169,7 +180,7 @@ export async function runPipelineCase(
     injectionReplaced = readInjectionReplaced(logDir);
   }
 
-  return {
+  const run: PipelineRunResult = {
     status: result.status,
     exitCode: result.exitCode,
     elapsedMs: Date.now() - started,
@@ -189,6 +200,60 @@ export async function runPipelineCase(
     pipelinePath,
     error: result.error,
   };
+  if (c.verification && options.independent !== false) {
+    return { ...run, independentVerification: await verifyCandidate(ctx, c, task, run) };
+  }
+  return run;
+}
+
+/** Rebuild the saved candidate with hidden, fixed tests in fresh worktrees. */
+async function verifyCandidate(ctx: JobContext, c: SuiteCase, task: string, run: PipelineRunResult): Promise<IndependentVerification> {
+  const spec = c.verification!;
+  const outcome = (status: IndependentVerification["status"], detail: string,
+    changedFiles: readonly string[] = [], reference: PipelineRunResult | null = null): IndependentVerification => ({
+      status, detail, changedFiles, logDir: reference?.logDir ?? null,
+      state: reference?.summary?.state ?? null, mismatches: reference?.mismatches ?? [],
+    });
+  if (run.status !== "exited" || run.exitCode !== 0 || run.summary?.state !== "ACCEPTED" || !run.logDir) {
+    return outcome("not-run", "primary pipeline did not accept a candidate");
+  }
+  const dir = join(ctx.caseDir, "independent");
+  mkdirSync(dir, { recursive: true });
+  try {
+    const patchRecord = readJson<{ base_sha: string; commit_sha: string; changed_files: string[] }>(
+      join(run.logDir, "artifacts", "patch-candidate.json"));
+    if (!/^[0-9a-f]{40,64}$/.test(patchRecord.base_sha) || !/^[0-9a-f]{40,64}$/.test(patchRecord.commit_sha)) {
+      throw new Error("invalid candidate revision evidence");
+    }
+    const patch = await exec({ program: "git", args: ["diff", "--binary", patchRecord.base_sha, patchRecord.commit_sha, "--"],
+      cwd: run.repoDir, timeoutMs: 30_000 });
+    const names = await exec({ program: "git", args: ["diff", "--name-only", patchRecord.base_sha, patchRecord.commit_sha, "--"],
+      cwd: run.repoDir, timeoutMs: 30_000 });
+    if (patch.status !== "exited" || patch.exitCode !== 0 || names.status !== "exited" || names.exitCode !== 0) {
+      throw new Error("cannot recover candidate patch: " + patch.stderr + names.stderr);
+    }
+    const changed = names.stdout.trim().split(/\r?\n/).filter(Boolean);
+    if (!patch.stdout.trim() || !spec.changedFiles.some((path) => changed.includes(path))) {
+      return outcome("failed", "candidate did not modify any required target", changed);
+    }
+    const path = join(dir, "candidate.patch");
+    writeFileSync(path, patch.stdout, "utf8");
+    ctx.onPhase("independent", "rebuilding candidate with evaluator-owned tests");
+    const reference = await runPipelineCase({ ...ctx, caseDir: dir }, {
+      ...c, id: c.id + "-reference", stages: { ...spec.stages, refactor: { mode: "patch", patchFile: path } },
+      inject: spec.inject,
+    }, task, { repoDir: run.repoDir, independent: false });
+    writeJson(join(dir, "run-result.json"), reference);
+    const declarations = reference.comparisonPath === null ? []
+      : readJson<{ declarations?: unknown[] }>(reference.comparisonPath).declarations ?? [];
+    const ok = reference.status === "exited" && reference.exitCode === 0 && reference.summary?.state === "ACCEPTED"
+      && reference.summary.baseline_build === "pass" && reference.summary.candidate_build === "pass"
+      && declarations.length > 0 && reference.mismatches.length === 0 && reference.comparisonErrors.length === 0;
+    return outcome(ok ? "passed" : "failed", ok ? "fresh baseline and candidate passed fixed independent verification"
+      : `independent pipeline state=${String(reference.summary?.state)}: ${reference.error ?? reference.stderrText.slice(-500)}`, changed, reference);
+  } catch (error) {
+    return outcome("failed", error instanceof Error ? error.message : String(error));
+  }
 }
 
 /** Recover injection evidence from both new and legacy saved runs. */

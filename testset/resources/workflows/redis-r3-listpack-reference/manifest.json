@@ -1,0 +1,11 @@
+{
+  "builds": [
+    {
+      "id": "redis-r3-listpack-reference",
+      "entry": "../project-reference/build-workflow.ts"
+    }
+  ],
+  "testEntry": "../project-reference/test-workflow.ts",
+  "workflowId": "redis-r3-listpack-reference",
+  "revision": 1
+}
