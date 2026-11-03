@@ -18,7 +18,7 @@
 | 阶段 | 输入 | 输出 | 默认实现（AI/宿主） | 可替换 |
 |---|---|---|---|---|
 | `preflight` | `ctx` | `{ host, project }` | `probeHost` + `detectCProject` | ✅ |
-| `workflows` | `preflight` | `{ declared }`（构建声明、固定辅助材料、测试 workflow 解析） | test-writer 委托 scout 调查、build-writer 准备产物，再完成测试 | ✅ |
+| `workflows` | `preflight` | `{ declared }`（构建声明、固定辅助材料、测试 workflow 解析） | test-writer 调查、提交计划并写测试，build-writer 编写构建和产物使用说明 | ✅ |
 | `prepare` | `preflight`, `workflows` | `{ branch, baseSha, worktrees }` | 建候选分支 + baseline/candidate 双 worktree | ✅ |
 | `refactor` | `…`, `candidate` | `{ summary }` | refactor 会话 | ✅ |
 | `verify` | `…`, `patch` | `WorkflowVerificationOutcome` | `runWorkflowVerification`（差分构建 + 跑测试 + 判定） | ⚠️ 允许，但会被标记**非权威** |
@@ -28,8 +28,10 @@
 默认 Preflight 发现工具路径、识别源码和构建标记，并查询 CMake 版本与生成器元数据；不创建临时工程或编译。
 项目状态 `detected` 仅表示发现 C 源码，实际构建可行性由 build-writer 和所选 workflow 确认。
 
-`verification-scout` 是 workflows 内部的子 agent，不新增阶段。自动编写会话必须提交本次结构化调查报告；
-`presetWorkflowsStage` 不经过 AI 会话，也不要求 scout 报告。职责与报告路径见 [验证方式与辅助材料](verification-strategies.md)。
+源码调查已合入 test-writer 的同一会话，不再创建 `verification-scout` 子角色。自动编写会话必须提交
+本次结构化验证计划，再编写具体用例。build-writer 仍是子角色；两个编写角色暂时无 Bash，
+实际编译和运行由 verify 阶段的宿主执行。
+`presetWorkflowsStage` 不经过 AI 会话，也不要求这份计划。职责与报告路径见 [验证方式与辅助材料](verification-strategies.md)。
 
 ## 2. core 用法（程序化）
 

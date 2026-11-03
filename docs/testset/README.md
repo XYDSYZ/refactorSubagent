@@ -1,6 +1,9 @@
-# libuv 测试集（仓库内目录）
+# 真实项目测试集（仓库内目录）
 
 判定"行为是否保持"的测试工具与期望：用例目录、共享资源、并行执行器、执行器手册。
+Redis 与外部依赖模拟的新用例及复核方法见 [`11-project-evaluation-cases.md`](11-project-evaluation-cases.md)。
+七例真实 AI 运行的逐阶段耗时、失败归因与质量分析见 [`12-project-ai-results-2026-10-29.md`](12-project-ai-results-2026-10-29.md)。
+四个失败场景修复后的真实重跑、详细失败解释及补充验证见 [`13-failed-cases-rerun-2026-10-29.md`](13-failed-cases-rerun-2026-10-29.md)。
 它住在 harness 仓库里（`testset/` + `docs/testset/`），但**只用 CLI 调用 harness**（`bun scripts/cli.ts run …`），
 不 import 应用源码——测试工具与产品的分层，靠调用边界而不是目录边界来保证。
 

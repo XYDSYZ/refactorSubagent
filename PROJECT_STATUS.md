@@ -1,6 +1,6 @@
 # Behavior-Preserving Refactoring Agent：项目现状与后续路线
 
-> 文档日期：2026-10-28（§1–§11 为当前状态；带日期的验证记录对应各自里程碑，历史架构见文末附录）
+> 文档日期：2026-11-03（§1–§11 为当前状态；带日期的验证记录对应各自里程碑，历史架构见文末附录）
 >
 > 当前定位：面向 C 代码的行为保持型重构原型。闭环已在 Windows + MinGW + Claude Agent SDK 环境完成真实端到端验证（含首个 `ACCEPTED`）；已补齐 Windows/Linux 工程检查与 CI 配置，并统一进程超时、取消和回收。验证记录见 §8.5–§8.6，平台级宿主隔离仍待实现。
 
@@ -46,13 +46,13 @@ deny 规则（Bash(git push:*)）       挡住逃出本机、不可本地撤销�
 baseline/candidate 行为门禁          限制能蒙混过关什么
 ```
 
-**关于 Bash（2026-09-10 决定）**：三个会话现在都有 shell。理由是**自验**——
-refactor agent 能在一次性 worktree 里编译自己的改动，build-writer 能真跑一遍
-configure/build 再据此写 workflow，而不是靠猜（"生成的 workflow 跑不起来"是
-这条链历史上最主要的失败模式）。代价是"无 Bash"这层保护消失：会话能触及宿主
-用户可达的任何路径。因此宿主不再信任会话留下的状态——它重新测量 diff（见
-§5.2）并重跑权威 workflow；真正的隔离仍待平台层（§9.1）。`git push` 通过
-deny 规则挡住（实测有效），其余破坏性命令靠"环境可弃 + 结果可重算"兜底。
+**关于 Bash（当前状态）**：test-writer 与 build-writer 已暂时从各自工具列表移除 Bash，
+根据源码与 Preflight 事实交付代码，实际编译和测试由宿主随后执行（§8.18）。
+refactor agent 仍可在一次性 worktree 之外编译检查自己的修改。2026-09-10 曾让三个角色
+都使用 shell 的方案保留为历史决策，不再描述当前编写流程。
+工具列表不是文件系统隔离：Write/Edit 及 refactor 的 shell 仍可触及用户权限可达的路径。
+宿主继续重新测量 diff（§5.2）、固定验证材料并重跑权威 workflow；真正的隔离仍待平台层（§9.1）。
+`git push` 通过 deny 规则挡住（实测有效），其余风险依靠一次性环境与完整性检查降低。
 
 ## 2. 当前技术栈与验证环境
 
@@ -324,23 +324,22 @@ worktree 之外。
 
 ## 6. Agent 层
 
-四类模型角色，工具集**逐条显式列出**（SDK 中省略列表 = 继承全部内置工具，含
+生产流程有三类模型角色，工具集**逐条显式列出**（SDK 中省略列表 = 继承全部内置工具，含
 Bash/WebFetch，因此 `DriverOptions.allowedTools` 是必填参数，漏传会编译失败）。
-原有三个角色有 Bash（见 §1 的决策说明），新增 scout 只读源码并提交宿主报告；`Bash(git push:*)` 对所有会话 deny。
+两个编写角色暂时无 Bash，refactor 保留 Bash；`Bash(git push:*)` 对所有会话 deny。
 
 | 会话 | 工具（常量名） | 产物 |
 |---|---|---|
-| test-writer | `TEST_WRITER_AGENT_TOOLS`：Read / Glob / Grep / Write / Edit / Task / **Bash** | TestWorkflow 源 + `declareDependency` 声明集 |
-| verification-scout（经 Task 派生的子 agent） | Read / Glob / Grep + MCP `inspectWorkflow` / `submitVerificationAnalysis` | 验证范围、依赖处置、行为观测要求与依据的结构化报告 |
-| build-writer（经 Task 派生的子 agent） | Read / Glob / Grep / **Bash** + MCP `generateBuildWorkflow` / `inspectWorkflow`（无 Write/Edit） | BuildWorkflow 源（经宿主 registry 落盘） |
+| test-writer | `TEST_WRITER_AGENT_TOOLS`：Read / Glob / Grep / Write / Edit / Task；另有显式 MCP 工具 | 结构化验证计划 + TestWorkflow 源 + `declareDependency` 声明集 |
+| build-writer（经 Task 派生的子 agent） | Read / Glob / Grep + MCP `generateBuildWorkflow` / `inspectWorkflow`（无 Write/Edit/Bash） | BuildWorkflow 源、固定辅助材料与预期产物使用说明（经宿主 registry 落盘） |
 | refactor | `REFACTOR_AGENT_TOOLS`：Read / Write / Edit / Glob / Grep / **Bash** | candidate worktree 内的改动 |
 
-- **test-writer** 通过 `dep-registry` MCP server 声明构建依赖，生成的 workflow 源必须通过 `workflow-spec` 技能约定的接口。
-- **verification-scout** 使用独立精简 skill 调查源码，不加载 Workflow API；test-writer 先委托调查再决定方案、编写用例和辅助代码。宿主要求本次成功提交报告，原子保存到仓库运行目录的 `workflows/verification-analysis.json`；会话结束后关闭提交。源码证据、测量与推断分开，推荐 mock 时需说明接入点、模拟行为和覆盖损失。该检查不证明建议正确或内容真实。
-- **build-writer** 是 test-writer 经 `Task` 派生的子 agent，其 workflow 源码只能经宿主的 `generateBuildWorkflow` 落盘（它没有 `Write`/`Edit`）；Bash 让它能先在 scratch 目录真跑一遍构建，据实测结果而非推断来写 workflow。子 agent 的显式工具列表不继承父会话的 MCP 工具，因此需按名声明。
-- **有 shell 后的两条约定**（写进提示词）：探测性构建要放在仓库/worktree 之外，因为留在里面的东西会进入 patch；不要执行 git 变更命令——宿主拥有 staging/commit/branch，agent 自己 commit 虽然被宿主兼容（见 §5.2），但 reset/checkout 只会毁掉自己的工作。
+- **test-writer** 在同一会话中先按 `verification-planning` skill 调查源码、选择验证方式并调用 `submitVerificationAnalysis`，再加载实现规范、编写测试和辅助代码。宿主要求本次成功提交计划，原子保存到运行目录的 `workflows/verification-analysis.json`；会话结束后关闭提交。源码证据、测量与推断分开，推荐 mock 时需说明接入点、模拟行为和覆盖损失。结构检查不证明计划内容正确。构建依赖通过 `dep-registry` MCP server 声明。
+- **build-writer** 是 test-writer 经 `Task` 派生的子 agent，其 workflow 与辅助材料经宿主 `generateBuildWorkflow` 落盘；交付准确产物路径及预期调用、链接加载和生命周期说明，实际构建由宿主执行。子 agent 的显式工具列表不继承父会话的 MCP 工具，因此需按名声明。
+- **独立调查评测** 复用同一套调查提示词和计划提交机制，保留历史 scout 命令与场景名；生产流程不再创建 scout 子角色。
+- **refactor 的 shell 约定**（写进提示词）：探测性构建放在仓库/worktree 之外，因为遗留产物会进入 patch；不要执行 git 变更命令——宿主拥有 staging/commit/branch，agent 自己 commit 虽然被兼容（见 §5.2），但 reset/checkout 可能毁掉其工作。
 - **refactor** 在候选 worktree 中运行，**重构范围不设限**——由 baseline/candidate 双跑 workflow 的行为门禁兜底；`git add` / `git commit` 由宿主执行。
-- **Preflight** 保留宿主/项目测量，实测事实直接注入 test-writer、scout 与 build-writer；独立 Analyze 已删除。scout 建议范围，test-writer 决定最终方案，build-writer 交付真实构建及产物的完整使用说明，并通过 registry 提交辅助输入。宿主固定后向两侧分发，执行期事实继续通过 `ctx.facts` 提供。
+- **Preflight** 保留宿主/项目测量，实测事实直接注入 test-writer 与 build-writer；独立 Analyze 已删除。test-writer 决定方案，build-writer 编写构建和产物使用说明并提交辅助输入。宿主固定后向两侧分发，执行期事实继续通过 `ctx.facts` 提供。
 
 Windows 下 Driver 优先使用 `CLAUDE_CODE_EXECUTABLE`，否则查找 `%APPDATA%\npm\claude.cmd`。
 
@@ -788,6 +787,131 @@ API 文档补充直接拼接示例，产物断言、构建示例和验证方式�
 
 本轮仅调整提示词与文档。类型检查通过；构建角色与工作流会话两文件测试 20 pass / 0 fail、76 个断言；
 diff 检查通过。未重跑真实模型或 Linux/macOS，§8.18 的原始生成材料与运行证据保持原样。
+
+### 8.20 Redis 全流程场景可行性调查（2026-10-28）
+
+统一后缀指导已提交为 `786f8f6`。随后检出官方 Redis 8.10.3，固定提交
+`1a2574ce1551d3de6e0b4a56756c0fdbc6659e4f`；源码与调查证据位于忽略目录 `runs/redis-feasibility-20261028/`。
+
+- WSL Ubuntu 24.04 实际构建核心服务器/CLI，SDS 72 项通过，dict/listpack 内部入口正常执行；
+  定向字符串与协议 Tcl 单元分别实际通过 179 / 27 项，构建未改变受控源码。
+- 真实宿主配预写局部 C 测试与固定补丁：等价变量重命名 `ACCEPTED`，前导零与最小负整数错误各 `REJECTED`；
+  三轮两侧均构建/运行成功，18 项观测，没有将基础设施失败计为错误检出。
+- 真实工作流完成服务器前台启动、条件写入、保留 TTL、关闭后 AOF 重启恢复与正常回收。
+- 设计六类候选：字符串参数、SET 选项、listpack、字典迁移、RESP 分片、AOF 清单；
+  明确 Linux 平台、build 目录产物策略、解释器发现、零测试判定及独立可信复核的接入工作。
+
+本轮没有真实 AI 编写、AI 重构或评分，也没有新增正式 Redis case；实验不能作为模型综合能力通过的证据。
+详细依据、运行限制与推进顺序见 [`10-redis-feasibility-and-scenarios-2026-10-28.md`](docs/testset/10-redis-feasibility-and-scenarios-2026-10-28.md)。
+
+### 8.21 Redis 与依赖模拟正式用例（2026-10-28）
+
+新增七个标准 e2e 用例：Redis 8.10.3 的 SDS、SET、listpack、dict 迁移、RESP 分片、AOF，
+以及缺失 DeviceSDK 的通信客户端合成工程。任务不预告验证方式；正常路径均由 AI 编写构建/测试并重构。
+Redis 声明 Linux；通信工程支持 Windows/Linux，提供 ABI/协议和真实业务实现，由模型自行编写依赖替身。
+
+- 测试执行器新增可选独立复核：主流程接受后提取保存的候选补丁，用固定隐藏判据在新双侧 worktree 重建；
+  失败或证据缺失不能使整体评测通过。重判保留复核证据；评分输入包含辅助源码、候选补丁与复核结果。
+  修复评分器参考 Markdown 文件及仓库内源码路径的兼容问题。生产 Agent、提示词与执行流程未改动。
+- WSL Ubuntu 24.04 的最终 22 个固定对照全部符合预期：7 个有效重构接受、15 个错误修改拒绝，
+  两侧构建及测试均有效；SET/RESP 当次上游测试实际通过 179/27 项。Windows 通信场景另有 4/4 对照成功。
+  增加上游内部超时和未完成检查；较早失败实验保留，不以环境错误或超时冒充错误检出。
+- 真实模型 `deepseek-v4.1-flash` 完成 Windows 通信场景：自行编写替身与 28 个场景，双侧 57 项比较一致，
+  实质性提取 `transfer_exact`；独立 17 项固定检查通过。主流程约 25 分 7 秒，含独立复核等整次约 26 分 14 秒。
+  原始报告阶段错误已用保存证据恢复；未调用外部质量裁判，仍为 pending-rubric。
+  生成测试固定部分精确 I/O 次数与预算序列，可能误拒绝其他合理实现，已记录质量缺口。
+- 独立负向实验验证：主测试漏检错误校验和并 ACCEPTED，独立判据 REJECTED，整体评测 failed。
+  类型检查通过；定向工程测试 9 pass / 0 fail、40 个断言；执行器自检符合全部预期。
+
+最终校准索引 `runs/project-evaluation-20261028/summary.json`；真实 AI 证据
+`runs/ml-a/summary.reviewed.json`，原始 `summary.json` 保留。Redis 六例尚未逐例调用真实模型。
+完整用例内容、对照、限制与重跑命令见 [`11-project-evaluation-cases.md`](docs/testset/11-project-evaluation-cases.md)。
+
+### 8.22 七例真实 AI 全流程与逐阶段测量（2026-10-29）
+
+在 WSL Ubuntu 24.04 调用真实 `deepseek-v4.1-flash`，执行六个 Redis 场景与通信依赖模拟场景；
+正常阶段均为 AI 编写验证、AI 重构，无固定补丁注入。并发 2，UTC 起止时间差约 64 分 27 秒。
+原始结果 **3 pass / 4 fail，0 blocked**；质量评分为独立会话的同一模型，分数供参考。
+
+- 通信模拟、listpack、dict 完成双侧真实构建/测试并接受，固定独立复核分别 17/14/9 项通过；
+  评分 0.82/0.90/0.88。通信模型自行提供 `transport_*` 替身与可控时钟，仍构建并调用真实业务库。
+- SDS 与 AOF 都因生成测试自己的字节长度错误使正确原版测试失败；SET 编译成功后，
+  构建脚本直接执行 `src/redis-server`，而构建阶段没有放行项目内程序（测试阶段另允许 `build/**`）；三者均 ABORTED。
+  RESP 在生成阶段用尽 48 轮，未进入重构与实际运行。未修改输出或放宽判据以改判。
+- 对三个有保存补丁的失败例另外执行固定诊断：SDS 15 项、SET 13 项及当次 179 项上游测试、
+  AOF 12 项均通过。补证据评分为 0.80/0.40/0.62，不能替代原始失败。
+  本批已生成的 6 份实际重构补丁均通过固定测试；没有证明全部生成测试可靠。
+- 约 84% 的单例累计耗时在调查/生成验证；正式验证累计约 68 秒。关键缺口是原版失败后的反馈、
+  明确产物执行契约、避免把环境未列工具当成不可用、减少实现细节断言与重复调查。
+  评分器还会漏掉 ABORTED 场景已保存补丁，本轮通过单独补充评分保留并纠正证据，未改正式执行器。
+
+最终证据 `runs/project-ai-20261029/summary.json`、`metrics.json`、`quality-scores.json`，
+详细说明见 [`12-project-ai-results-2026-10-29.md`](docs/testset/12-project-ai-results-2026-10-29.md)。
+本轮只新增报告和采集/诊断材料，未修改生产源码、提示词或正式判据；保留此前未提交用例实现，未推送远端。
+
+后续按用户要求取消测试编写会话默认 48 轮上限：`sessions.testWriter.maxTurns=null`，
+driver 不再向 SDK 传轮数上限；显式配置仍可覆盖，现有会话时间预算与无消息检测独立生效。
+同步配置文档，并更正报告中本批运行当时的构建/测试执行权限区别：构建阶段的项目程序放行列表为空，
+测试阶段才允许 `build/**`，文件存在断言不授予执行权限。类型检查、28 项定向测试与
+`git diff --check` 通过；CLI 确认当前生效 `maxTurns=null`。未重新调用模型，历史运行结果保留。
+
+### 8.23 工作区内相对产物路径执行（2026-10-29）
+
+- 构建与测试阶段统一设置 `executableGlobs: ["**"]`，允许直接运行当前 worktree 内的产物，
+  如 `src/redis-server`；不再要求产物位于 `build/`。底层 broker 的默认拒绝与自定义收紧能力保留。
+- `program` 相对当前 worktree 根目录解析，不随进程 `cwd` 改变；根目录程序用 `./app`。
+  原有词法越界、工作区外绝对路径与符号链接检查继续生效；辅助材料仍限制在 `build/verification/`。
+  已同步构建/测试系统提示词与必读规范。
+- 新增完整流程回归：两侧各自把真实源码与固定辅助代码编译到 `src/`，构建阶段执行冒烟检查，
+  测试阶段再执行并比较观测，结果为 ACCEPTED。修复前同例因构建执行路径被拒而 ABORTED。
+  另验证 `process.run/start` 对三种越界路径均拒绝，显式 `build/**` 策略仍可收紧执行范围。
+- 验证：类型检查通过；Windows 四文件定向测试 **30 pass / 0 fail，163 个断言**；
+  WSL Ubuntu 24.04 三项新增回归 **3 pass / 0 fail，24 个断言**，包含无 `.exe` 后缀的真实编译和双侧运行。
+  未重新调用模型或重跑七例 Redis/通信评测；历史报告已注明后续修复，原始裁决保留。
+
+### 8.24 四个失败场景的真实 AI 重跑（2026-10-29）
+
+- 在新的 WSL 原生目录重新调用 `deepseek-v4.1-flash` 运行 SDS、SET、RESP、AOF 四例，
+  不注入参考工作流或固定补丁；并发 2，日志 UTC 起止约 40 分 04 秒。此前通过的通信模拟、listpack、字典未重复调用模型。
+- 正式结果 **1 passed / 3 failed，失败三例均为 ABORTED，0 blocked / 0 errored**：
+  SDS 54 个输入场景、55 项比较一致，自动固定复核 15 项通过；SET 因 Bash 辅助脚本只传 3 参却读取 `$4` 中止；
+  RESP 已完成生成及重构，但原版协议探针报 4 项失败，其中 ECHO 的数组参数数写成 1 而非 2 已确认，超长头无回复尚未单独定位；
+  AOF 在生成阶段触发 20 分钟时间预算，没有重构补丁或实际构建、测试。
+- 额外用固定流程验证本次 SET、RESP 实际补丁，两侧分别通过 13 项 + 179 项上游字符串测试、
+  9 项 + 27 项上游协议测试；不改变原始主流程中止及自动复核未运行的事实。
+- 原样重放上次 SET 工作流，构建阶段 `src/redis-server --version` 和 CLI 均能执行，直接确认路径规则修复；
+  随后旧测试暴露 PTTL 预期 `-2`、实际 `-1` 的错误，原始记录保留。
+- 单例总耗时中约 82% 用于调查和生成。已取消轮数上限，AOF 仍因时间预算中止；主要后续方向是有限反馈和控制生成范围。
+  SET/RESP 初评漏收已保存补丁，补证据后均为 0.55；评分只作参考，SDS 1.00 也不代表内存安全已被完整证明。
+- 详细报告：[四例重跑](docs/testset/13-failed-cases-rerun-2026-10-29.md)；证据：`runs/project-ai-rerun-20261029/`（忽略目录）。
+  本次整理只新增报告和索引，未修改生成测试、生产代码、预算或正式判据；未提交或推送。
+
+### 8.25 取消七例评测的 20 分钟会话预算（2026-10-30）
+
+- 六个 Redis 用例与通信依赖模拟用例中，测试编写、重构两项 `deadlineMs` 均从 `1200000` 改为 `null`。
+  显式取消下层配置的会话总时长限制；产品默认本已为 `null`，不修改通用执行器。
+- 单例外层总超时仍为 90 分钟，无消息检测与单次构建、测试、命令预算独立生效。
+  此次只改用例预算与说明，不改历史证据、不实现反馈机制，也未重新调用模型。
+- 验证：通过测试集实际加载与配置解析，七例共 14 项会话预算均生效为 `null`；
+  现有配置测试 **10 pass / 0 fail，29 个断言**，`git diff --check` 通过。
+
+### 8.26 PR 交付整理与当前验证边界（2026-11-03）
+
+- 将尚未提交的实现按运行权限与预算、项目评测与固定复核、报告与当前文档三个部分整理；
+  临时 PR 正文和周报保持原样，不纳入这批提交。原始运行证据继续保留在忽略目录 `runs/`。
+  前两部分分别保存为 `cb57651` 和 `00daa29`；均为本地提交，未推送远端。
+- 固定补丁保留上游源码的上下文空白；仅对这批 `.patch` 设置路径级空白检查属性，
+  避免把补丁语法和上游原文当作新代码的空白错误，不改校准过的补丁内容。
+- 同步当前角色表和阶段说明：调查已合入 test-writer，同一会话提交计划再编写；
+  两个编写角色暂时无 Bash，生产只保留 build-writer 子角色，不再创建 scout。
+- 本会话已完成类型检查、四文件定向工程回归 **35 pass / 0 fail，179 个断言**、
+  执行器自检和差异空白检查。整理只修正文档并提交已验证源码，没有再次调用模型，
+  未重新运行完整工程套件或 Windows/Linux 全部离线用例。
+- GitHub PR #3 当前仍为 OPEN，涉及跨平台、进程回收与既有测试集；本分支基于它开发。
+  本次查询其 Windows/Linux 检查均为 SUCCESS，合并状态为 CLEAN；尚未执行远端合并。
+  新 PR 应在其合并后比较 main，或暂以 `feat/testset-hard-targets` 为基线审阅，避免重复计算工作量。
+- 反馈循环尚未实现，由后续工作负责。四例真实重跑仍为 1 通过、3 中止；
+  取消会话预算之后没有重新运行 AOF，不能将它记为已解决或全部用例通过。
 
 ## 9. 已知限制与风险
 
