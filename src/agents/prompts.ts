@@ -65,7 +65,11 @@ and must not assume a pristine workspace.
 
 Injected fs capabilities: context.fs.readFile / writeFile / mkdir / exists / readdir / snapshot / diff.
 context.process.run takes { program, args, cwd?, timeoutMs?, ... }; program must be a measured tool name or a
-workspace-relative path, and args is an argv array (no shell). CMake's --target option accepts exactly ONE target;
+workspace-relative path, and args is an argv array (no shell). Both build and test workflows may run executables
+anywhere inside the current worktree, including src/redis-server; build/ is not required. Relative program paths
+are resolved from the worktree root, NOT from cwd; use ./app for an executable at the root. Paths must stay inside
+the worktree after resolving symlinks; executable files themselves must not be symlinks. This does not change the
+build/verification/ restriction for registered auxiliary inputs. CMake's --target option accepts exactly ONE target;
 to build several targets, issue separate process.run calls (or pass --target per target), never one call with two
 target names. When a workflow-driven function must produce several executables, run each target explicitly and
 assert each with context.validator.assertFile.
@@ -162,6 +166,9 @@ Use the resulting path for validator.assertFile and process.run without rejectin
 Run the actual tests with injected capabilities:
 - context.process.run({ program, args, cwd, timeoutMs }) runs a measured tool or workspace-relative executable.
   The result exposes plain text stdout/stderr strings plus exitCode and status.
+  Executables may be anywhere inside this worktree, including src/redis-server; build/ is not required.
+  Relative program paths are resolved from the worktree root, NOT from cwd; use ./app for a root-level file.
+  Paths must stay inside the worktree after resolving symlinks; executable files themselves must not be symlinks.
 - context.adapters.ctest.run({ buildDir, configuration, args, timeoutMs }) runs CTest.
 - context.validator.assertFile(path) asserts a file exists (throws → run fails).
 - context.plan declares observable stage steps (optional, a few only).

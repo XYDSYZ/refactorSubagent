@@ -36,6 +36,8 @@ export default async (ctx: WorkflowContext) => {
 - 测试目标是**跑已构建的可执行/库并观测行为**（退出码、输出、计数），
   把这些观测用 `ctx.expect` 声明。
 - 产物也可以是 BuildWorkflow 新编译的辅助程序，调用当前侧真实库或模块；先读 `verification-strategies.md`
+- 允许直接运行当前 worktree 内任意目录的产物（如 `src/redis-server`），不局限于 `build/`
+  相对 `program` 按 worktree 根目录解析，与 `cwd` 无关；根目录程序用 `./app`，越界和链接规则见 `workflow-api.md`
 - 每侧必须有至少一个真实观测；零声明会失败。先确认执行有效，再比较值。
   超时、崩溃、加载失败、未发现相关用例必须 throw，不能只比较两个相同错误。
   负向用例要明确检查每侧的预期错误，不要求所有测试程序都返回 0。

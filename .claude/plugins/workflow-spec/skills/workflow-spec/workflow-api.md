@@ -146,6 +146,10 @@ stop(handle) => Promise<ProcessResult>;
 - 判断成功：`result.status === "exited" && result.exitCode === 0`，不要只看 exitCode
 - `stdout`/`stderr` 是解码文本；需要原始字节时读取 `stdoutBase64`/`stderrBase64`
 - program 必须是 `host.tools` 里 available 的工具名，或工作区相对路径
+- 构建与测试阶段都允许执行当前 worktree 内任意目录的程序，例如 `src/redis-server`，不要求放在 `build/`
+- 相对 `program` 始终按 **worktree 根目录**解析，不随 `cwd` 改变；根目录的程序写 `./app`，裸名字 `app` 会按工具名查找
+- 路径不能越出工作区；解析目录符号链接后也必须位于工作区内，可执行文件本身不能是符号链接
+- 产物可执行范围与辅助输入范围不同：`materials` 仍只能登记在 `build/verification/`
 
 ### tools（WorkflowTools）
 

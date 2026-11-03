@@ -139,6 +139,31 @@ function abortReason(result: Awaited<ReturnType<typeof runStageFlow>>): string {
 }
 
 describe("fixed auxiliary verification through the real pipeline", () => {
+  test("build and test can execute this worktree's artifacts outside build/", async () => {
+    const build = DIRECT_BUILD
+      .replace('const app = "build/verification/probe"', 'const app = "src/probe"')
+      .replace('  await ctx.validator.assertFile(app, "probe");', `
+  await ctx.validator.assertFile(app, "probe");
+  const checked = await ctx.process.run({ program: app, args: [] });
+  if (checked.status !== "exited" || checked.exitCode !== 0 || checked.stdout.trim() !== "1,-7") {
+    throw new Error("built artifact smoke check failed");
+  }`);
+    const testWorkflow = TEST_WORKFLOW.replace('const app = "build/verification/probe"', 'const app = "src/probe"');
+    const f = await fixture({ build, test: testWorkflow });
+    const result = await f.run(f.patch(false));
+    expect(result.state, abortReason(result)).toBe("ACCEPTED");
+    for (const side of ["baseline", "candidate"]) {
+      const artifacts = join(result.logDir, "artifacts");
+      const built = JSON.parse(readFileSync(join(artifacts, `${side}-build-1-${f.builds[0]!.id}.json`), "utf8"));
+      expect(built.status).toBe("pass");
+      expect(built.events.filter((event: { execution?: { status: string; exitCode: number } }) =>
+        event.execution?.status === "exited" && event.execution.exitCode === 0)).toHaveLength(2);
+      const tested = JSON.parse(readFileSync(join(artifacts, `${side}-test-workflow-run.json`), "utf8"));
+      expect(tested.status).toBe("pass");
+      expect(tested.expectations[0].value).toBe("1,-7");
+    }
+  }, 120_000);
+
   test("multiple declared builds retain separate execution evidence on both sides", async () => {
     const f = await fixture({ additionalBuilds: [{
       name: "secondary",

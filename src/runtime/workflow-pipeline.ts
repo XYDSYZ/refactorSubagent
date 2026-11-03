@@ -443,10 +443,9 @@ function testWorkflowPolicy(request: WorkflowVerificationRequest) {
   return {
     readableGlobs: ["**"],
     writableGlobs: ["**"],
-    // The self-driven test workflow runs the artifacts the declared builds
-    // produced (assertFile first, then process.run). Allow executables under
-    // the build tree only — never arbitrary programs.
-    executableGlobs: ["build/**"],
+    // Projects may produce executables outside build/ (e.g. src/redis-server).
+    // The broker still checks workspace containment and rejects symlink escapes.
+    executableGlobs: ["**"],
     allowedTools: [],
     maxProcesses: caps.maxProcesses,
     maxOutputBytes: caps.maxOutputBytes,
@@ -530,6 +529,8 @@ async function executeBuildFor(
         : resolution.output === null
           ? ["**"]
           : ["build/**"],
+      // Build scripts may run this worktree's artifacts for smoke checks.
+      executableGlobs: ["**"],
       allowedTools: resolution.output === null
         ? []
         : requiredBuildTools(resolution.output),
