@@ -312,4 +312,67 @@ describe("owned process lifecycle", () => {
       expect(f.pids().some(alive)).toBeFalse();
     } finally { await f.dispose(); }
   }, caseTimeout);
+
+  for (const delivery of ["delayed", "missing"] as const) {
+    test.skipIf(process.platform !== "linux")(`owned process confirms descendant shutdown with ${delivery} forced termination`, async () => {
+      const f = fixture("export default () => null");
+      const adapter = fileURLToPath(new URL("../shared/owned-process.ts", import.meta.url));
+      writeFileSync(join(f.root, "parent.ts"), `
+        import { spawn } from "node:child_process";
+        import { existsSync } from "node:fs";
+        const child = spawn(process.execPath, ["tool.ts"], { stdio: "ignore" });
+        while (!existsSync("tool.pid")) await Bun.sleep(10);
+        child.unref();
+      `);
+      writeFileSync(join(f.root, "owner.ts"), `
+        import { readFileSync } from "node:fs";
+        import { spawnOwnedProcess } from ${JSON.stringify(adapter)};
+        const kill = process.kill.bind(process);
+        // Isolate fault injection in this process. An asynchronous delivery
+        // must not let the owner's result precede the descendant's shutdown.
+        let intercepted = false;
+        process.kill = (pid, signal) => {
+          if (pid < 0 && signal === "SIGKILL") {
+            intercepted = true;
+            ${delivery === "delayed" ? 'setTimeout(() => kill(pid, signal), 100);' : ""}
+            return true;
+          }
+          return kill(pid, signal);
+        };
+        const owned = spawnOwnedProcess({
+          program: process.execPath, args: ["parent.ts"], cwd: process.cwd(), stdin: "ignore",
+        });
+        owned.child.stdout.resume();
+        owned.child.stderr.resume();
+        const result = await owned.exited;
+        const pid = Number(readFileSync("tool.pid", "utf8"));
+        let running = false;
+        try {
+          kill(pid, 0);
+          const state = readFileSync("/proc/" + pid + "/stat", "utf8").split(") ")[1][0];
+          running = state !== "Z" && state !== "X";
+        } catch (error) {
+          if (!["ESRCH", "ENOENT"].includes(error.code)) throw error;
+        }
+        console.log(JSON.stringify({ intercepted, running, error: result.error?.message ?? null }));
+      `);
+      try {
+        const result = await bounded(exec({
+          program: process.execPath, args: ["owner.ts"], cwd: f.root, timeoutMs: 6000,
+        }), f.cleanup, 8000);
+        expect(result.status, result.stderr).toBe("exited");
+        expect(result.exitCode).toBe(0);
+        const report = JSON.parse(result.stdout);
+        expect(report.intercepted).toBeTrue();
+        if (delivery === "delayed") {
+          expect(report.error).toBeNull();
+          expect(report.running).toBeFalse();
+          expect(f.pids().some(alive)).toBeFalse();
+        } else {
+          expect(report.error).toMatch(/process group.*after forced termination/);
+          expect(report.running).toBeTrue();
+        }
+      } finally { await f.dispose(); }
+    }, caseTimeout);
+  }
 });

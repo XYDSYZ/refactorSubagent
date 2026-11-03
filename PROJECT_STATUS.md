@@ -927,6 +927,25 @@ driver 不再向 SDK 传轮数上限；显式配置仍可覆盖，现有会话�
 - 证据：`runs/h6-order-20261103-r2`。首跑 `runs/h6-order-20261103` 因基线测试程序缺失中止；
   用户说明误删情况后重新运行，未覆盖首跑记录。此次未调用模型、未重跑整套离线测试或远端 CI。
 
+### 8.28 Linux 进程组终止确认竞态修复（2026-11-03）
+
+- `ea2e4bc` 的两轮 Windows CI 均通过 23 项离线评测，PR 触发的 Linux 检查也通过；
+  push 触发的 Linux 工程检查在 CTest 超时回收断言失败：结果已返回，测试子进程仍短暂存活。
+  WSL 诊断复现了发送 `SIGKILL` 后立即返回的问题，不是 H6 补丁或僵尸进程误报。
+- `shared/owned-process.ts` 在 POSIX 强制终止后增加最长 2 秒的进程组停止确认，
+  Linux 按 `/proc` 中的进程组与状态排除已死亡的僵尸成员；仍有运行成员或无法检查时返回清理错误。
+  直接父进程已经退出、管道已经关闭，不再被当作整个进程组停止的证据。Windows Job 路径未改。
+- 新增两项 Linux 隔离回归：延迟送达强制终止信号时必须等待后代停止；阻止终止完成时必须有期限地报错。
+  两项在旧实现均失败，修复后均通过；原 CTest 回收断言和 5 秒超时预算保留。
+- WSL 同一诊断脚本缩短自身超时至 500 ms 连续运行 50 次：旧实现有 2 次返回时工具仍运行，
+  修复后为 0 次。该诊断预算仅用于复现，不改变工程用例预算。
+- Linux 定向进程/CTest 回归 **17 pass / 0 fail**；完整 `bun run check` 的类型检查、
+  **227 pass / 2 skip / 0 fail（37 文件、853 断言）**与执行器自检通过，
+  两项跳过均因当前 WSL 缺少 Ninja。Windows 类型检查通过，定向回归 **15 pass / 2 Linux 专用跳过 / 0 fail**。
+- 证据：`runs/linux-process-reap-20261103/` 的 `regression-before.txt`、`regression-after.txt`、
+  `fast-repeat-fixed.jsonl`、`lifecycle-fixed-linux.txt`、`check-fixed-linux.txt`。
+  此轮未重跑大型离线套件、未调用模型或重跑远端 CI；macOS 未实跑。
+
 ## 9. 已知限制与风险
 
 ### 9.1 权限边界依赖宿主目录，不是 OS 沙箱
