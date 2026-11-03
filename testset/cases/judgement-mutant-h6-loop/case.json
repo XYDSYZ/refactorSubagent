@@ -1,6 +1,6 @@
 {
   "id": "judgement-mutant-h6-loop",
-  "title": "H6 变异（环形 pending 队列/backend timeout 被简化）必须 REJECTED",
+  "title": "H6 变异（删掉首轮定时器处理，改变回调顺序）必须 REJECTED",
   "subject": "judgement",
   "tags": [
     "offline",
@@ -48,20 +48,14 @@
     ],
     "authoritative": true,
     "provisional": false,
-    "note": "实测冻结（2026-09-21，12 条失配） — failuresRequired 钉住 oracle 三件套；共享判据下同一变异可能同时触发别的目标 oracle（h6 变异也触发 h4-walk oracle），失配集不是单目标归因",
+    "note": "实测冻结（2026-11-03，6 条失配；runs/h6-order-20261103-r2）：只删掉 UV_RUN_DEFAULT 首轮定时器处理，回调顺序从 TPC 变成 PCT；保留 backend timeout 守卫以避免资源回收挂起。failuresRequired 钉住 H6 oracle 三件套，上游 close_order 同时检出该顺序错误；全部进程均自行退出。",
     "failuresExact": [
       "close_order.exit",
-      "close_order.stdout",
       "close_order.tap",
-      "h4-walk/oracle_walk.exit",
-      "h4-walk/oracle_walk.stdout",
-      "h4-walk/oracle_walk.summary",
+      "close_order.stdout",
       "h6-loop/oracle_loop.exit",
-      "h6-loop/oracle_loop.stdout",
       "h6-loop/oracle_loop.summary",
-      "loop_backend_timeout.exit",
-      "loop_backend_timeout.stdout",
-      "loop_backend_timeout.tap"
+      "h6-loop/oracle_loop.stdout"
     ]
   },
   "inject": [

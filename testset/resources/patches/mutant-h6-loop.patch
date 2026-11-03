@@ -1,26 +1,7 @@
 diff --git a/src/win/core.c b/src/win/core.c
-index 317238f..10de446 100644
 --- a/src/win/core.c
 +++ b/src/win/core.c
-@@ -412,14 +412,9 @@ int uv_loop_alive(const uv_loop_t* loop) {
- 
- 
- int uv_backend_timeout(const uv_loop_t* loop) {
--  if (loop->stop_flag == 0 &&
--      /* uv__loop_alive(loop) && */
--      (uv__has_active_handles(loop) || uv__has_active_reqs(loop)) &&
--      loop->pending_reqs_tail == NULL &&
--      loop->idle_handles == NULL &&
--      loop->endgame_handles == NULL)
--    return uv__next_timeout(loop);
--  return 0;
-+  /* How long the backend may sleep is simply the delay until the next timer;
-+   * uv__next_timeout() already reports -1 when there is nothing to wait for. */
-+  return uv__next_timeout(loop);
- }
- 
- 
-@@ -707,15 +702,8 @@ int uv_run(uv_loop_t *loop, uv_run_mode mode) {
+@@ -707,15 +707,8 @@ int uv_run(uv_loop_t *loop, uv_run_mode mode) {
    if (!r)
      uv_update_time(loop);
  
