@@ -20,6 +20,13 @@ export default async (ctx: WorkflowContext) => {
 - 产物存在性由 `validator.assertFile` 断言——断言失败 → throw → workflow 失败
 - 函数必须**幂等**（宿主会重跑；configure 重复执行应是无害的）
 - 产物路径可以是**运行时探测**的结果（MSVC Debug 的 `d` 后缀等），探测后断言真实路径
+- 产物可以位于当前 worktree 的任意目录，例如 `src/redis-server`；构建流程也可直接运行它进行冒烟检查，不要求复制到 `build/`
+- `process.run/start` 的相对 `program` 按 worktree 根目录解析，与 `cwd` 无关；根目录程序用 `./app`，越界和链接规则见 `workflow-api.md`
+- 项目目标、库消费者与局部源码 harness 都属于 BuildWorkflow 的准备范围；方案由 test-writer 选择
+- 辅助输入通过 `generateBuildWorkflow` 的 `materials: [{path, content}]` 登记在 `build/verification/`
+  宿主固定后分发到两侧，workflow 不再生成/改写这些输入，输出使用不同路径
+- 所有命令先检查 `status === "exited" && exitCode === 0`；原库/模块必须来自当前 worktree
+- 不修改项目受控源码或原构建文件。wrapper 构建文件也应作为独立材料登记
 
 ## validator API
 
@@ -94,8 +101,11 @@ export default async (ctx) => {
 
   // 5. 断言产物存在（探测真实路径后断言，不猜）
   const has = async (p: string) => ctx.fs.exists(p);
-  const app = (await has("build/Debug/uv_run_tests.exe")) ? "build/Debug/uv_run_tests.exe" : "build/Debug/uv_run_testsd.exe";
-  const appA = (await has("build/Debug/uv_run_tests_a.exe")) ? "build/Debug/uv_run_tests_a.exe" : "build/Debug/uv_run_tests_ad.exe";
+  const suffix = ctx.facts.host.executable_suffix;
+  const sharedPath = "build/Debug/uv_run_tests" + suffix;
+  const staticPath = "build/Debug/uv_run_tests_a" + suffix;
+  const app = (await has(sharedPath)) ? sharedPath : "build/Debug/uv_run_testsd" + suffix;
+  const appA = (await has(staticPath)) ? staticPath : "build/Debug/uv_run_tests_ad" + suffix;
   await ctx.validator.assertFile(app, "shared test runner");
   await ctx.validator.assertFile(appA, "static test runner");
 };

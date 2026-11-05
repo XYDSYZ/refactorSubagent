@@ -1,0 +1,11 @@
+{
+  "builds": [
+    {
+      "id": "redis-r6-aof-reference",
+      "entry": "../project-reference/build-workflow.ts"
+    }
+  ],
+  "testEntry": "../project-reference/test-workflow.ts",
+  "workflowId": "redis-r6-aof-reference",
+  "revision": 1
+}

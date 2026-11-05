@@ -42,7 +42,7 @@ export const SessionLimits = z
     deadlineMs: NullablePositiveInt,
     /** Silence window that declares the SDK stream dead. null = disabled. */
     stallMs: NullablePositiveInt,
-    /** Max assistant turns. null = SDK default. */
+    /** Max assistant turns. null = no turn cap (omit the SDK option). */
     maxTurns: NullablePositiveInt,
     /**
      * Model name/id handed to the agent CLI for this session. null = whatever
@@ -120,7 +120,7 @@ export type ResourceLimits = z.infer<typeof ResourceLimits>;
 export const DEFAULT_LIMITS: Limits = {
   version: 1,
   sessions: {
-    testWriter: { deadlineMs: null, stallMs: 180_000, maxTurns: 48, model: null },
+    testWriter: { deadlineMs: null, stallMs: 180_000, maxTurns: null, model: null },
     refactor: { deadlineMs: null, stallMs: 180_000, maxTurns: 80, model: null },
   },
   stages: { buildMs: null, ctestMs: null, testWorkflowMs: null, policyRepairs: 1 },

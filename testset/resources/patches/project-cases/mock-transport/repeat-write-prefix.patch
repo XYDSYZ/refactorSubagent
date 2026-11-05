@@ -1,0 +1,11 @@
+--- a/src/frame_client.c
++++ b/src/frame_client.c
+@@ -25,7 +25,7 @@
+         uint64_t elapsed = transport_now_ms() - began;
+         long n;
+         if (elapsed >= timeout_ms) { result = FRAME_TIMEOUT; goto finish; }
+-        n = transport_write(connection, request + sent, sizeof request - sent,
++        n = transport_write(connection, request, sizeof request - sent,
+                             timeout_ms - (unsigned)elapsed);
+         if (n == -2) continue;
+         if (n <= 0 || (size_t)n > sizeof request - sent) goto finish;

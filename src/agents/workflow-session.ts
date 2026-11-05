@@ -9,12 +9,18 @@ import { runAgent, type DriverRun } from "./driver.js";
 import { TEST_WORKFLOW_SYSTEM } from "./prompts.js";
 import type { Logger } from "../runtime/log.js";
 import { DEFAULT_LIMITS, type SessionLimits } from "../config/limits.js";
+import { workflowPreflightContext } from "./workflow-facts.js";
+import { VerificationAnalysisStore } from "./verification-analysis.js";
+import { verificationPlanningPrompt } from "./verification-planning.js";
+import { workflowSkillContext } from "./workflow-skills.js";
 
 /**
  * workflow-session — orchestrates a test-writer Claude session that produces
  * a TestWorkflow source and a dependency declaration set.
  *
  * The test-writer can:
+ *   - investigate source behavior and submit its verification plan through
+ *     submitVerificationAnalysis in the same conversation that authors tests,
  *   - inspectWorkflow: list persisted library + run-local build workflows,
  *   - declareDependency: declare which builds this test depends on (full set,
  *     empty = none),
@@ -76,12 +82,15 @@ export interface WorkflowSessionResult {
   readonly declaredBuilds: readonly string[];
   /** True when the produced test workflow source exists at testEntry. */
   readonly testEntryExists: boolean;
+  /** Host-saved advisory report, or null if none was submitted this session. */
+  readonly verificationAnalysisPath: string | null;
   /** Session timed out. */
   readonly timedOut: boolean;
   /** Why the session outcome is not usable (when ok is false). */
   readonly failure: string | null;
 }
 
+// Temporarily omit Bash. Restore it here if authoring shell access is enabled again.
 export const TEST_WRITER_AGENT_TOOLS = [
   "Read",
   "Glob",
@@ -89,68 +98,82 @@ export const TEST_WRITER_AGENT_TOOLS = [
   "Write",
   "Edit",
   "Task",
-  "Bash",
 ] as const;
 
 const SESSION_PROMPT = (
   task: string,
   testEntry: string,
-): string => `You are the TestWorkflow writer for a behavior-preserving C refactoring system.
+  preflight: string,
+): string => `${verificationPlanningPrompt(task, preflight)}
 
-Task under test:
-${task}
+In this session you also implement the verification plan. Keep investigation and
+test authoring in this conversation so source findings are available when choosing
+inputs and observations. Complete and submit the investigation before writing
+test/helper code. Load workflow-generation references after the plan is accepted.
 
-You must produce TWO deliverables before the session ends:
-  1. A dependency declaration — call declareDependency with the COMPLETE set
-     of build workflow ids your test depends on. ALWAYS call it, even with an
-     empty array [] (meaning: no build needed). The host executes every
-     declared build (baseline and candidate) BEFORE running your test workflow,
-     so declare every build whose artifacts your test references. Missing or
-     malformed declarations fail the session.
-  2. A self-driven TestWorkflow TypeScript module, written to exactly:
+Required deliverables:
+  1. Your source investigation, accepted by submitVerificationAnalysis during
+     this session. A stale file or a prose summary does not count. Correct and
+     resubmit the complete plan if new source evidence changes the chosen scope.
+  2. A complete declareDependency call with every build workflow the test uses.
+     At least one build is required; a preparation workflow may validate existing
+     per-worktree artifacts if compilation is unnecessary.
+  3. A self-driven TestWorkflow TypeScript module written to exactly:
        ${testEntry}
-     (repo-relative path)
 
-Workflow of the session:
-  1. Call inspectWorkflow (kind: "build") to see what build workflows exist:
-     library entries (status library-verified/library-draft, with descriptions)
-     and entries generated earlier this run (status run-local).
-  2. Decide: reuse a suitable library build, or author a new one.
-     - Reuse: use its id in declareDependency.
-     - New: spawn the build-writer subagent via the Task tool. IMPORTANT: run it
-       in the FOREGROUND (run_in_background: false) and WAIT for its result
-       before doing anything else — spawn one agent, collect its report, then
-       continue. Never fire background agents and finish without their results;
-       the session is not complete until the build exists and you have its
-       artifact paths. The build-writer writes the BuildWorkflow source through
-       the host (generateBuildWorkflow) and reports the assigned workflow_id
-       plus EVERY artifact path the build produces and how to invoke each.
-  3. Call declareDependency with the final complete set.
-  4. Write the test workflow file. Your test workflow:
-     - MUST NOT rebuild anything — the host already built every declared build
-       in this worktree before your function runs. Reference the artifact paths
-       the build-writer reported (or that you know from the repo) directly and
-       assert them with context.validator.assertFile — if an artifact is
-       missing, fail (do NOT fall back to building it yourself).
-     - Runs once per worktree (baseline, then candidate) with the SAME source;
-       you cannot tell which side you are on. Declare expectations with
-       ctx.expect(...) — same declarations, same order, on both runs.
+After submitting the plan:
+  1. Read the host workflow skill and its implementation guidance for the selected
+     scope. Reuse source findings already established in this conversation;
+     supplement them when a concrete interface or behavior detail is missing.
+     ${workflowSkillContext("workflow-spec")}
+  2. Design inputs, observations, and any helper or test-double code. Account for
+     the plan's important behavior and error paths. Existing tests can cover
+     some items; explain material gaps instead of claiming complete coverage.
+  3. Use build-writer when a new build is needed or an existing recipe's usage is
+     unclear. Supply the selected scope, saved plan path, required real
+     implementation, and COMPLETE helper source content.
+     - Build-writer authors compilation/linking steps and describes intended
+       artifact paths and usage (arguments/stdin/output protocol;
+       library entry points, loading and lifecycle; or runner selection/results).
+       The host executes the delivered workflows after this authoring session.
+     - If helper code requires that usage first, ask for a consultation, then
+       write the helper and request the final build. Consultations do not register
+       provisional workflows.
+     - All helper sources/data/wrapper build files must be registered as
+       materials [{path, content}] under build/verification/. The host freezes
+       and distributes identical bytes to both worktrees after candidate commit.
+       Each side compiles its own real implementation.
+     - Handle concrete source or isolation questions yourself. Have build-writer
+       encode the selected scope's toolchain/configuration checks in the workflow.
+       An unselected alternative's environment does not block the chosen scope.
+       Stop for missing decisive source contracts, not merely because a build
+       has not yet been executed.
+     Run build-writer in the foreground and wait for its result before continuing.
+  4. Call declareDependency with the final complete build id set and write the
+     TestWorkflow. It MUST NOT rebuild: the host runs declared builds first.
+     Assert required artifact paths with context.validator.assertFile; fail if
+     absent. Use the same test source and declarations in the same order on both
+     worktrees, with no detection of which side is running.
+  5. Write execution-validity checks into the TestWorkflow: inspect process
+     status/exitCode and relevant test discovery before comparisons. Crashes,
+     timeouts, loading failures and zero tests must fail the workflow. Normal
+     tests require exit code 0; negative cases need an explicit expected failure
+     contract. The workflow emits actual implementation observations through
+     ctx.expect when the host runs it.
 
-You have a shell (Bash) and should use it to establish the facts your workflow
-depends on instead of guessing them: check which tools actually exist, list the
-project's real build targets, and try a build if that answers a question. Never
-modify tracked files in the repository and never run git commands that change
-state - the host owns the worktrees. Probe builds must happen OUTSIDE the repo
-(for example under the system temp directory), because anything you leave inside
-the repo becomes part of the run.
+Authoring produces source from repository reads, supplied preflight facts and
+build-writer's usage report. Finish after the plan, dependencies and test source
+are delivered. Compilation, execution and execution diagnostics belong to the
+host's later steps, not to this session. Do not run compilers, test programs,
+syntax probes or simulated workflow contexts. Preserve tracked source/build
+files and Git state, and deliver auxiliary code through registered materials.
+During formal verification, tests and materials are fixed; candidate failures
+never justify weakening them.
 
-If the build-writer reports a failure or the generated workflow is rejected,
-do not guess: either fall back to an existing library build (declare its id) or
-stop and explain what is missing in your final message — the host will fail the
-session rather than run a broken test.
-
-The host validates your test workflow file and your declaration after the
-session; both must be complete before you finish.`;
+Finish with a concise summary referring to the saved plan and test file: selected
+scope, important covered behaviors, and material coverage gaps or plan changes.
+The host checks the current analysis submission, declared builds and test file.
+`;
 
 /**
  * Run a test-writer session. Returns the session outcome; the caller decides
@@ -169,37 +192,48 @@ export async function runWorkflowSession(
     host: options.host,
     project: options.project,
   });
-  const mcpServer = createDependencyMcpServer({ registry });
+  const verificationAnalysis = new VerificationAnalysisStore(
+    join(repoDir, ".refactor", "runs", options.sessionId, "workflows", "verification-analysis.json"),
+    options.task,
+  );
+  const mcpServer = createDependencyMcpServer({ registry, verificationAnalysis });
   const serverName = "dep-registry";
   const mcpToolPrefix = `mcp__${serverName}__`;
   const mcpTools = [
     `${mcpToolPrefix}inspectWorkflow`,
     `${mcpToolPrefix}declareDependency`,
     `${mcpToolPrefix}generateBuildWorkflow`,
+    `${mcpToolPrefix}submitVerificationAnalysis`,
   ];
 
+  const preflight = workflowPreflightContext(options.host, options.project);
   const agents: Record<string, unknown> = {
-    "build-writer": buildWriterDefinition(serverName),
+    "build-writer": buildWriterDefinition(serverName, preflight),
   };
-  const prompt = SESSION_PROMPT(options.task, options.testEntry);
+  const prompt = SESSION_PROMPT(options.task, options.testEntry, preflight);
 
   const runner = options.runAgentFn ?? defaultRunAgent;
-  const run = await runner({
-    cwd: repoDir,
-    prompt,
-    systemPrompt: TEST_WORKFLOW_SYSTEM,
-    allowedTools: [...TEST_WRITER_AGENT_TOOLS],
-    extraAllowedTools: mcpTools,
-    agents,
-    mcpServers: { [serverName]: mcpServer },
-    skills: ["workflow-spec:workflow-spec"],
-    maxTurns: limits.maxTurns,
-    model: limits.model,
-    timeoutMs: limits.deadlineMs ?? undefined,
-    stallTimeoutMs: limits.stallMs,
-    logger: options.logger,
-    sessionStore: options.sessionStore,
-  });
+  let run: DriverRun;
+  try {
+    run = await runner({
+      cwd: repoDir,
+      prompt,
+      systemPrompt: TEST_WORKFLOW_SYSTEM,
+      allowedTools: [...TEST_WRITER_AGENT_TOOLS],
+      extraAllowedTools: mcpTools,
+      agents,
+      mcpServers: { [serverName]: mcpServer },
+      skills: ["workflow-spec:verification-planning", "workflow-spec:workflow-spec"],
+      maxTurns: limits.maxTurns,
+      model: limits.model,
+      timeoutMs: limits.deadlineMs ?? undefined,
+      stallTimeoutMs: limits.stallMs,
+      logger: options.logger,
+      sessionStore: options.sessionStore,
+    });
+  } finally {
+    verificationAnalysis.close();
+  }
 
   const testEntryExists = existsSync(options.testEntry);
   const declaredBuilds = await registry.currentDeclared();
@@ -215,6 +249,8 @@ export async function runWorkflowSession(
     failure =
       "test-writer finished without calling declareDependency; it must declare " +
       "the full dependency set (empty allowed only via an explicit declareDependency([]))";
+  } else if (!verificationAnalysis.hasSubmission()) {
+    failure = "test-writer finished without submitting its verification analysis through submitVerificationAnalysis";
   }
 
   return {
@@ -222,6 +258,7 @@ export async function runWorkflowSession(
     summary: run.result,
     declaredBuilds,
     testEntryExists,
+    verificationAnalysisPath: verificationAnalysis.hasSubmission() ? verificationAnalysis.path : null,
     timedOut: run.timedOut,
     failure,
   };

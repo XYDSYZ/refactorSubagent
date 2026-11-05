@@ -43,25 +43,35 @@ interface WorkflowContext {
 {
   platform: "win32" | "linux" | "darwin";   // 当前平台
   arch: string;                              // 如 "x64"
-  executable_suffix: string;                 // win32 是 ".exe"，否则 ""
+  executable_suffix: string;                 // 总是提供：win32 是 ".exe"，Linux/macOS 是合法的空字符串 ""
   shell: string;                             // 检测到的 shell
   tools: Record<string, {                    // 工具探测结果
-    available: boolean;                      // 是否在 PATH 上（唯一事实来源）
+    available: boolean;                      // 是否在 PATH 上发现工具
     path: string | null;                     // 绝对路径（available=true 时非 null）
     version: string | null;
   }>;
-  cmake: {                                   // cmake 详细探测
+  cmake: {                                   // CMake 元数据查询
     version: string | null;
-    generators: string[];                    // 可用生成器
-    default_generator: string | null;
-    c_compiler: string | null;
-    configure_probe: "pass" | "fail" | "not-run";
-    build_probe: "pass" | "fail" | "not-run";
+    generators: string[];                    // CMake 自报支持的生成器
+    reason: string | null;                   // 查询结果或失败诊断
   };
 }
 ```
 
-**规则**：工具可用性**只能**看 `host.tools[name].available`。不要假设工具存在。
+**可执行文件路径**：构建和测试工作流直接把 `ctx.facts.host.executable_suffix` 拼接到不带扩展名的路径：
+
+```ts
+const executable =
+  "build/verification/text_copy_harness" + ctx.facts.host.executable_suffix;
+```
+
+Windows 得到 `text_copy_harness.exe`，Linux/macOS 得到 `text_copy_harness`。空字符串是合法后缀，不是缺失值。
+不要用 `if (!suffix)`、长度检查或 `suffix || ...` 将它判错或替换，也无需按 `platform` 或读取 CMakeCache 重新推导。
+编译输出、产物存在断言和启动命令使用同一路径；构建后用 `validator.assertFile` 检查实际产物存在。
+
+**规则**：通过 `host.tools[name].available` 判断工具路径是否已发现。
+默认 Preflight 只查询 CMake 版本和生成器元数据，不 configure/build。
+生成器所需的宿主依赖、编译器及项目配置是否可用，由 build-writer 和真实 workflow 构建确认。
 
 ## facts.project（ProjectDetection，总是存在）
 
@@ -75,11 +85,14 @@ interface WorkflowContext {
   primary_build_system: string | null;      // 如 "cmake"
   markers: string[];                        // 如 ["CMakeLists.txt"]
   source_files: string[];
-  adapter: "direct-compiler" | "cmake" | "ninja" | null;
-  status: "ready" | "needs-adapter" | "unsupported";
+  adapter: "direct-compiler" | "cmake" | "ninja" | "make" | "msvc" | "unsupported";
+  status: "detected" | "no-c-sources" | "ready" | "needs-adapter";
   reason: string;
 }
 ```
+
+新探测只报告 `detected`（发现 C 源码）或 `no-c-sources`；`ready` / `needs-adapter` 仅兼容历史审计。
+项目状态描述源码和构建标记的识别结果，不代表构建已经通过或验证方案不可行。
 
 **规则**：`facts.project` 和 `facts.host` **总是存在**。如果 workflow 需要它们，直接访问，不要做存在性检查后抛"missing facts"。
 
@@ -117,6 +130,8 @@ run(spec: {
   signal: string | null;
   stdoutBase64: string;      // base64 编码的 stdout
   stderrBase64: string;
+  stdout: string;            // 客户端已解码的 UTF-8 文本
+  stderr: string;
   durationMs: number;
   error: string | null;
 }>;
@@ -129,8 +144,12 @@ stop(handle) => Promise<ProcessResult>;
 
 **规则**：
 - 判断成功：`result.status === "exited" && result.exitCode === 0`，不要只看 exitCode
-- stdout/stderr 是 **base64**，需要时自己解码
+- `stdout`/`stderr` 是解码文本；需要原始字节时读取 `stdoutBase64`/`stderrBase64`
 - program 必须是 `host.tools` 里 available 的工具名，或工作区相对路径
+- 构建与测试阶段都允许执行当前 worktree 内任意目录的程序，例如 `src/redis-server`，不要求放在 `build/`
+- 相对 `program` 始终按 **worktree 根目录**解析，不随 `cwd` 改变；根目录的程序写 `./app`，裸名字 `app` 会按工具名查找
+- 路径不能越出工作区；解析目录符号链接后也必须位于工作区内，可执行文件本身不能是符号链接
+- 产物可执行范围与辅助输入范围不同：`materials` 仍只能登记在 `build/verification/`
 
 ### tools（WorkflowTools）
 
@@ -160,14 +179,15 @@ assertAbsent(path: string, description?: string): Promise<void>; // 断言路径
 ```
 
 **规则**：
-- **构建类 workflow 必须用它断言每个产物存在**（如 `assertFile("build/Debug/app.exe", "test runner")`）
+- **构建类 workflow 必须用它断言每个产物存在**（如 `assertFile(executable, "test runner")`）
 - 断言失败 → throw → workflow 失败（fail-closed）
 - 这是**替代旧返回值 artifact 声明**的方式：**不需要返回产物清单**，函数正常返回即视为成功（断言已保证）
 
 示例：
 ```ts
-await validator.assertFile("build/Debug/uv_run_tests.exe", "shared test runner");
-await validator.assertFile("build/Debug/uv_run_tests_a.exe", "static test runner");
+const suffix = ctx.facts.host.executable_suffix;
+await ctx.validator.assertFile("build/Debug/uv_run_tests" + suffix, "shared test runner");
+await ctx.validator.assertFile("build/Debug/uv_run_tests_a" + suffix, "static test runner");
 ```
 
 ### expect（WorkflowExpectApi，双侧声明比较——仅自驱动 TestWorkflow）
@@ -235,7 +255,7 @@ import { execSync } from "child_process";
 // 错误：shell 字符串
 process.run({ program: "make && make install" });
 
-// 错误：stdout 当字符串用（实际是 base64）
+// 错误：把 base64 字段当输出文本使用
 const out = result.stdoutBase64;
 if (out.includes("error")) ...
 

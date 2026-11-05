@@ -1,0 +1,31 @@
+{
+  "case": "e2e-redis-r4-dict",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r4-dict/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取桶内查重逻辑，保留迁移与缓存语义"
+    },
+    {
+      "id": "ignore-new-table",
+      "patch": "resources/patches/project-cases/r4-dict/ignore-new-table.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "duplicate-in-new-table"
+      ],
+      "description": "迁移时不检查新表的重复键"
+    },
+    {
+      "id": "lose-existing-entry",
+      "patch": "resources/patches/project-cases/r4-dict/lose-existing-entry.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "duplicate-in-old-table",
+        "duplicate-in-new-table"
+      ],
+      "description": "查重时丢失已存在的 entry 返回值"
+    }
+  ]
+}

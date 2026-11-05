@@ -9,13 +9,12 @@ describe("buildWriterDefinition", () => {
     expect(Array.isArray(def.tools)).toBe(true);
   });
 
-  test("allowlists read + shell + the registry tools, but no file writers", () => {
+  test("currently allowlists reads and registry tools for source delivery", () => {
     const def = buildWriterDefinition();
     expect(def.tools).toContain("Read");
     expect(def.tools).toContain("Glob");
     expect(def.tools).toContain("Grep");
-    // Bash is granted so the writer can probe the real build instead of guessing.
-    expect(def.tools).toContain("Bash");
+    expect(def.tools).not.toContain("Bash");
     // The workflow source reaches the host through the registry tool only.
     expect(def.tools).toContain("mcp__dep-registry__generateBuildWorkflow");
     expect(def.tools).not.toContain("Write");
@@ -37,11 +36,6 @@ describe("buildWriterDefinition", () => {
     expect(def.prompt).toContain("FINAL message must report");
     expect(def.prompt).toContain("EVERY artifact path");
     expect(def.prompt).toContain("workflow_id");
-  });
-
-  test("prompt states the writer has no file-write tools", () => {
-    const def = buildWriterDefinition();
-    expect(def.prompt).toContain("You cannot write files");
   });
 
   test("prompt uses the full MCP tool name and forbids imports", () => {

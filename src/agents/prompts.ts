@@ -52,8 +52,9 @@ the build itself (workflow-driven): declare it explicitly at the top of the sour
 and make the default-exported function return nothing (void). Do NOT return a BuildWorkflowOutput object; the
 host no longer consumes one. Instead, after the real build steps complete, assert every produced artifact exists
 with context.validator:
-  await context.validator.assertFile("build/Debug/app.exe", "test runner");
-  await context.validator.assertFile("build/Debug/app_a.exe", "static test runner");
+  const suffix = context.facts.host.executable_suffix;
+  await context.validator.assertFile("build/Debug/app" + suffix, "test runner");
+  await context.validator.assertFile("build/Debug/app_a" + suffix, "static test runner");
 assertFile throws when the path is missing, failing the workflow (fail-closed). Use assertDir for directories and
 assertAbsent to assert a path does not exist.
 
@@ -64,7 +65,11 @@ and must not assume a pristine workspace.
 
 Injected fs capabilities: context.fs.readFile / writeFile / mkdir / exists / readdir / snapshot / diff.
 context.process.run takes { program, args, cwd?, timeoutMs?, ... }; program must be a measured tool name or a
-workspace-relative path, and args is an argv array (no shell). CMake's --target option accepts exactly ONE target;
+workspace-relative path, and args is an argv array (no shell). Both build and test workflows may run executables
+anywhere inside the current worktree, including src/redis-server; build/ is not required. Relative program paths
+are resolved from the worktree root, NOT from cwd; use ./app for an executable at the root. Paths must stay inside
+the worktree after resolving symlinks; executable files themselves must not be symlinks. This does not change the
+build/verification/ restriction for registered auxiliary inputs. CMake's --target option accepts exactly ONE target;
 to build several targets, issue separate process.run calls (or pass --target per target), never one call with two
 target names. When a workflow-driven function must produce several executables, run each target explicitly and
 assert each with context.validator.assertFile.
@@ -86,11 +91,19 @@ drive it with context.process.run ({ program: "make", args: [...] }) etc. Never 
 emit shell commands as strings passed to a shell; context.process.run executes argv directly without a shell.
 Never emit absolute paths or compiler include flags for determinism headers.
 
-Executable output paths on Windows end in .exe; on other platforms they do not. Decide the suffix from measured
-facts, never by guessing: ctx.facts.host.platform is "win32" on Windows (check it at runtime and append ".exe"
-to asserted artifact paths accordingly), or read CMAKE_EXECUTABLE_SUFFIX from the generated CMakeCache.txt after
-configure. Do not assume a bare path is the real artifact — the host rejects workflows that assert paths the
-build did not produce.
+The verification strategy belongs to the test-writer. A BuildWorkflow may also compile a small consumer
+linked to this worktree's library, or compile a harness with selected real project sources. Auxiliary
+inputs are registered through generateBuildWorkflow materials under build/verification/; they are fixed
+by the host and shared by both sides. Keep generated outputs separate from those inputs. Never edit
+tracked project sources or their build files to make testing possible, and never replace the implementation
+under test with a copy, stub, or prebuilt binary from another worktree.
+
+For executable output paths, append ctx.facts.host.executable_suffix directly to the platform-neutral path:
+  const executable = "build/verification/text_copy_harness" + ctx.facts.host.executable_suffix;
+The host always supplies this string: ".exe" on Windows, "" on Linux/macOS. The empty string is a VALID suffix.
+Use the resulting path consistently for compiler output, validator.assertFile, and process.run. Never reject an
+empty suffix or replace it with a truthiness fallback (suffix || ...). Use the supplied suffix instead of
+re-deriving it from host.platform or CMakeCache.txt; validate that the resulting artifact exists after building.
 
 The workflow source may use only injected WorkflowContext capabilities when execution is needed. It must not import
 node:/bun: modules or access process.*, Bun.*, the network, git, or arbitrary files. The host executes the source,
@@ -140,10 +153,22 @@ values — you never know the other side's values.
 Build artifacts ALREADY EXIST when your function runs — the host built every declared build in this
 worktree before invoking you. NEVER rebuild (no configure/compile/new build dir); run the existing executables
 and assert their paths with context.validator.assertFile first.
+These artifacts can include a newly built harness or library consumer. Run them against this side's
+implementation and record actual observed results. Declare at least one expectation. A crash, timeout,
+missing test discovery or unexpected nonzero exit must fail the workflow BEFORE comparison; two
+identical failures are not evidence of behavior preservation. Expected negative cases need an explicit
+per-side check of the intended error, as well as cross-side behavior observations.
+
+For executable paths, append ctx.facts.host.executable_suffix directly to the platform-neutral path, matching
+the build workflow. The host supplies ".exe" on Windows and "" on Linux/macOS; the empty string is valid.
+Use the resulting path for validator.assertFile and process.run without rejecting or replacing an empty suffix.
 
 Run the actual tests with injected capabilities:
 - context.process.run({ program, args, cwd, timeoutMs }) runs a measured tool or workspace-relative executable.
   The result exposes plain text stdout/stderr strings plus exitCode and status.
+  Executables may be anywhere inside this worktree, including src/redis-server; build/ is not required.
+  Relative program paths are resolved from the worktree root, NOT from cwd; use ./app for a root-level file.
+  Paths must stay inside the worktree after resolving symlinks; executable files themselves must not be symlinks.
 - context.adapters.ctest.run({ buildDir, configuration, args, timeoutMs }) runs CTest.
 - context.validator.assertFile(path) asserts a file exists (throws → run fails).
 - context.plan declares observable stage steps (optional, a few only).
@@ -155,8 +180,10 @@ Typical shape:
       program: "ctest", args: ["--test-dir", "build", "-C", "Debug", "--output-on-failure"],
       timeoutMs: 120000,
     });
-    ctx.expect("ctest-exit", suite.exitCode);          // equal across sides
-    ctx.expect("ctest-passed", suite.stdout.includes("100% tests passed"));
+    if (suite.status !== "exited" || suite.exitCode !== 0) throw new Error("CTest did not pass");
+    const total = /tests failed out of (\\d+)/.exec(suite.stdout);
+    if (total === null || Number(total[1]) === 0) throw new Error("CTest ran no tests");
+    ctx.expect("ctest-count", Number(total[1]));
   };
 
 The host executes this source in each worktree, pairs expectations by position, and compares with the declared

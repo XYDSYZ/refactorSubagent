@@ -1,0 +1,22 @@
+--- a/src/networking.c
++++ b/src/networking.c
+@@ -3275,6 +3275,10 @@
+  * This function is called if processInputBuffer() detects that the next
+  * command is in RESP format, so the first byte in the command is found
+  * to be '*'. Otherwise for inline commands processInlineBuffer() is called. */
++static int invalidMultibulkLength(int converted, const long long *length) {
++    return !converted || *length > INT_MAX;
++}
++
+ static int processMultibulkBuffer(client *c, pendingCommand *pcmd) {
+     char *newline = NULL;
+     int ok;
+@@ -3303,7 +3307,7 @@
+         serverAssertWithInfo(c,NULL,c->querybuf[c->qb_pos] == '*');
+         size_t multibulklen_slen = newline - (c->querybuf + 1 + c->qb_pos);
+         ok = string2ll(c->querybuf+1+c->qb_pos,newline-(c->querybuf+1+c->qb_pos),&ll);
+-        if (!ok || ll > INT_MAX) {
++        if (invalidMultibulkLength(ok, &ll)) {
+             pcmd->read_error = CLIENT_READ_INVALID_MULTIBUCK_LENGTH;
+             return C_ERR;
+         } else if (ll > 10 && authRequired(c)) {

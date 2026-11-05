@@ -1,4 +1,4 @@
-# testset — libuv 能力评估测试集
+# testset — 真实项目能力评估测试集
 
 一个用例 = 一个目录（`cases/<id>/case.json` + `prepare.ts`），共享内容（workflow 源、补丁、判据材料、
 源 pin、任务简报、语料）放在 `resources/` 里按名字引用。执行器（`run.ts` + `runner/`）负责：
@@ -15,15 +15,22 @@
 - [`02-testset-requirements.md`](../docs/testset/02-testset-requirements.md) — 判据需求与判定规则
 - [`01-refactor-targets.md`](../docs/testset/01-refactor-targets.md) — 可重构点与覆盖缺口
 - [`04-rubric.md`](../docs/testset/04-rubric.md) — 裁判给分标准
+- [`05-scout-evaluation.md`](../docs/testset/05-scout-evaluation.md) — 源码调查独立评测：分级场景、证据评分与复评
+- [`07-writer-integration.md`](../docs/testset/07-writer-integration.md) — 真实测试编写、固定补丁与无模型复跑
+- [`08-merged-authoring-comparison-2026-10-28.md`](../docs/testset/08-merged-authoring-comparison-2026-10-28.md) — 调查与编写合并的真实运行对比、覆盖与耗时
+- [`09-authoring-without-execution-2026-10-28.md`](../docs/testset/09-authoring-without-execution-2026-10-28.md) — 编写期间只交付代码、宿主执行的单次真实结果
+- [`10-redis-feasibility-and-scenarios-2026-10-28.md`](../docs/testset/10-redis-feasibility-and-scenarios-2026-10-28.md) — Redis 固定源码、真实接入实验与六类全流程候选场景
+- [`11-project-evaluation-cases.md`](../docs/testset/11-project-evaluation-cases.md) — 七个正式 Redis/依赖模拟用例、可信复核与固定正反对照校准
 
 ```bash
 cd <repo-root>
 
-bun testset/run.ts --list                                   # 45 个用例（扫描 cases/*/case.json）
+bun testset/run.ts --list                                   # 扫描 cases/*/case.json
 bun testset/run.ts --self-test                              # 执行器自检（合成用例，不碰项目）
 bun testset/run.ts --subject judgement --concurrency 2      # 判据本体：离线、不调模型
 bun testset/run.ts --only judgement-accept-comment          # 单个用例
 bun testset/run.ts --dry-run --subject writer               # 只看会做什么
+bun testset/run.ts --dry-run --subject scout                # 独立调查评测计划，不调用模型
 bun testset/run.ts --reevaluate runs/<批>                   # 用已存结果重判（零模型成本）
 bun testset/run.ts --freeze runs/<批>                       # 用实测失配集冻结 case.json 的期望
 ```
@@ -97,6 +104,9 @@ testset/
   整批退出码 1。
 - **blind 是默认**：环境里只有源码与任务；`inject` 列出的材料在候选提交之后、验证之前才注入两侧
   worktree，注入清单与 sha256 落在 `session/.refactor/e2e/<session>/artifacts/injections.json`。
+- **独立复核可选**：`verification` 指定模型会话结束后使用的固定构建/判据及必要目标文件。
+  主流程接受候选后，在新 worktree 中重放保存的补丁；复核缺失或失败都会使评测失败。
+  Redis 与依赖模拟的配置及校准方法见文档 11。
 - **环境目录**：`runs/<批>/<用例>/env/`，每次运行前清空重建；默认保留作证据（`--drop-env` 跑完删）。
 - **输出目录不复用**：用例目录里跑完会留下裁判材料（`rubric-prompt.md`），所以 runner 拒绝在已有
   旧结果的目录上重跑——提示 `--force` 才覆盖；目录里有非 runner 文件时连 `--force` 也拒绝。
@@ -139,8 +149,9 @@ bun testset/run.ts --only e2e-t1-blind --rubric-cmd "claude -p" --out runs/blind
   Linux 的 hard 判据运行 H3/H4/H7 的 oracle；Windows 运行完整 H1–H7，`environment_creation` 也仅在 Windows 运行。
   C oracle 使用编译器的平台宏分别检查错误码 ABI 和请求类型枚举布局。
   `judgement-accept-hard` 是 hard 判据的正对照，要求正确基线与行为保持补丁均通过，避免平台差异造成误拒绝。
-- 想换某阶段用的模型/程序：`--limit sessions.<stage>.model=<名字>`；整程序则设
-  `CLAUDE_CODE_EXECUTABLE=<兼容 CLI 的路径>`（见 `docs/limits.md`）。
+- 想换某阶段用的模型：在用例 `limits` 中设置 `sessions.<stage>.model`，或使用文档 `docs/limits.md`
+  规定的配置文件。`testset/run.ts` 不接收产品 CLI 的 `--limit` 参数；更换兼容 CLI 可设
+  `CLAUDE_CODE_EXECUTABLE=<兼容 CLI 的路径>`。
 - 结果永远落在 `--out`（默认 `runs/suite-<时间戳>/`）；已有旧结果的目录要 `--force` 才会覆盖。
 - Windows/MinGW 建议使用较短的输出目录（如 `--out runs/win-1`）。
   实测生成的依赖文件路径达到 260 字符时，GCC 会报 `opening dependency file ...: No such file or directory`；

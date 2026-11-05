@@ -1,0 +1,11 @@
+--- a/src/listpack.c
++++ b/src/listpack.c
+@@ -1149,7 +1149,7 @@
+         uint32_t num_elements = lpGetNumElements(lp);
+         if (num_elements != LP_HDR_NUMELE_UNKNOWN) {
+             if (!delete)
+-                lpSetNumElements(lp,num_elements+1);
++                lpSetNumElements(lp,num_elements+2);
+             else
+                 lpSetNumElements(lp,num_elements-1);
+         }

@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 import {
   query,
   type AgentDefinition,
@@ -9,8 +9,7 @@ import {
   type SessionStore,
 } from "@anthropic-ai/claude-agent-sdk";
 
-/** Tool-owned plugin dir (workflow-spec skill). Relative to this source. */
-const TOOL_PLUGIN_DIR = resolve(import.meta.dir, "..", "..", ".claude", "plugins", "workflow-spec");
+import { TOOL_PLUGIN_DIR } from "./workflow-skills.js";
 
 /**
  * Operations no agent session may perform, whatever its allowlist says.
@@ -31,10 +30,10 @@ const moduleRequire = createRequire(import.meta.url);
 /**
  * AgentDriver — thin wrapper over the Claude Agent SDK.
  *
- * Tool access is bounded by the SDK allowlist (allowedTools), not by a
- * host-side scope hook: no agent session gets Bash, and every agent runs in
- * a disposable worktree/session directory, so a misbehaving agent can only
- * damage its own scratch space.
+ * Explicit SDK tool lists control availability; they are not an OS sandbox.
+ * Refactor can use Bash; writers configure their own authoring tool lists.
+ * Isolated investigation uses source reads and host report tools. The host
+ * separately checks source integrity.
  */
 
 
@@ -81,9 +80,8 @@ export interface DriverOptions {
   /** Override Claude Code executable; defaults to the bundled SDK binary on Windows. */
   executable?: string;
   outputFormat?: Options["outputFormat"];
-  /** Skills to enable for this session (plugin:skill names). When omitted,
-   *  no skills are visible to the model — skills only load when listed here,
-   *  giving the host exact control over when a skill's full content loads. */
+  /** Main-session skill filter (plugin:skill names). Omission keeps CLI
+   *  defaults; subagents preload their own AgentDefinition.skills. */
   skills?: string[];
   /** Programmatically defined subagents (Agent tool) visible in this session. */
   agents?: Record<string, AgentDefinition>;

@@ -1,0 +1,13 @@
+import { cpSync, mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { envDir, git } from "../../../runner/case-api.js";
+const dir = envDir();
+mkdirSync(dir, { recursive: true });
+cpSync(join(import.meta.dir, "fixture"), dir, { recursive: true });
+writeFileSync(join(dir, ".gitignore"), "build/\n.refactor/\n");
+git(["init", "-q"], dir);
+git(["config", "core.autocrlf", "false"], dir);
+git(["config", "user.name", "refactor-testset"], dir);
+git(["config", "user.email", "refactor-testset@example.invalid"], dir);
+git(["add", "."], dir);
+git(["commit", "-qm", "frame client evaluation fixture"], dir);

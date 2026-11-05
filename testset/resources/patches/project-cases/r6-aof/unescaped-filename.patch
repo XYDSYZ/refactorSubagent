@@ -1,0 +1,11 @@
+--- a/src/aof.c
++++ b/src/aof.c
+@@ -119,7 +119,7 @@
+ sds aofInfoFormat(sds buf, aofInfo *ai) {
+     sds filename_repr = NULL;
+ 
+-    if (sdsneedsrepr(ai->file_name))
++    if (0)
+         filename_repr = sdscatrepr(sdsempty(), ai->file_name, sdslen(ai->file_name));
+ 
+     sds ret = sdscatprintf(buf, "%s %s %s %lld %s %c",

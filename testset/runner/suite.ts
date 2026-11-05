@@ -12,6 +12,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { readJson } from "./util.js";
+import { ScoutOptionsSchema, type ScoutOptions } from "./scout-contract.js";
 
 export type Subject = string;
 
@@ -37,7 +38,7 @@ const RubricFile = z
 
 const ExpectFile = z
   .object({
-    method: z.enum(["verdict", "verdict+attribution", "verdict+rubric", "part"]),
+    method: z.enum(["verdict", "verdict+attribution", "verdict+rubric", "scout+rubric", "part"]),
     state: z.string().min(1).optional(),
     failuresRequired: z.array(z.string()).optional(),
     failuresForbidden: z.array(z.string()).optional(),
@@ -61,16 +62,23 @@ const CaseFile = z
     title: z.string().min(1).optional(),
     subject: z.string().min(1).optional(),
     tags: z.array(z.string()).default([]),
-    kind: z.enum(["pipeline", "upstream-part"]).default("pipeline"),
+    kind: z.enum(["pipeline", "upstream-part", "scout"]).default("pipeline"),
     requires: RequiresFile.optional(),
     prepare: z.string().min(1).nullish(),
     repo: z.string().min(1).default("."),
     task: z.string().min(1).optional(),
     part: z.string().min(1).optional(),
     stages: StageFile.default({}),
+    /** Evaluator-owned replay, run only after the candidate session ends. */
+    verification: z.object({
+      resource: z.string().min(1),
+      inject: z.array(z.object({ source: z.string().min(1), dest: z.string().min(1) }).strict()),
+      changedFiles: z.array(z.string().min(1)).min(1),
+    }).strict().optional(),
     inject: z.array(z.object({ source: z.string().min(1), dest: z.string().min(1) }).strict()).default([]),
     limits: z.record(z.string(), z.union([z.string(), z.number(), z.null()])).default({}),
     timeoutMs: z.number().int().positive().optional(),
+    scout: ScoutOptionsSchema.optional(),
     expect: ExpectFile,
     evaluate: z.object({ command: z.string().min(1).nullish() }).strict().optional(),
   })
@@ -121,7 +129,7 @@ export interface SuiteCase {
   readonly title: string;
   readonly subject: Subject;
   readonly tags: readonly string[];
-  readonly kind: "pipeline" | "upstream-part";
+  readonly kind: "pipeline" | "upstream-part" | "scout";
   /** Absolute case directory. */
   readonly dir: string;
   /** Absolute prepare script, or null when the case needs no environment. */
@@ -133,9 +141,17 @@ export interface SuiteCase {
   readonly taskFile: string | null;
   /** Pipeline stages with every path already resolved (absolute). */
   readonly stages: Readonly<Record<string, Record<string, unknown>>>;
+  readonly verification?: {
+    readonly stages: Readonly<Record<string, Record<string, unknown>>>;
+    readonly inject: readonly Injection[];
+    /** At least one target must change; this does not grade refactoring quality. */
+    readonly changedFiles: readonly string[];
+  };
   readonly inject: readonly Injection[];
   readonly limits: Readonly<Record<string, string | number | null>>;
   readonly timeoutMs: number | null;
+  /** Isolated scout budgets; never forwarded to the production pipeline. */
+  readonly scout?: ScoutOptions;
   readonly expect: Expectation;
   readonly evaluate: { readonly command: string | null } | null;
   /** Absolute part definition, upstream-part cases only. */
@@ -258,7 +274,7 @@ function parseCase(root: string, dir: string, problems: MaterialProblem[]): Suit
   }
 
   let taskFile: string | null = null;
-  if (raw.kind === "pipeline") {
+  if (raw.kind === "pipeline" || raw.kind === "scout") {
     const path = resolveResource(root, dir, raw.task ?? "task.txt");
     if (existsSync(path)) taskFile = path;
     else problems.push({ caseId: id, problem: `task brief not found: ${path}` });
@@ -281,8 +297,25 @@ function parseCase(root: string, dir: string, problems: MaterialProblem[]): Suit
   });
 
   const expect = raw.expect;
-  if (expect.rubric !== undefined && expect.method !== "verdict+rubric") {
-    throw new Error(`${where}: expect.rubric needs method 'verdict+rubric'`);
+  if (raw.verification && (raw.kind !== "pipeline" || expect.state !== "ACCEPTED")) {
+    throw new Error(`${where}: independent verification requires an ACCEPTED pipeline case`);
+  }
+  if (expect.rubric !== undefined && expect.method !== "verdict+rubric" && expect.method !== "scout+rubric") {
+    throw new Error(`${where}: expect.rubric needs method 'verdict+rubric' or 'scout+rubric'`);
+  }
+  if (raw.kind === "scout" || expect.method === "scout+rubric") {
+    if (raw.kind !== "scout" || expect.method !== "scout+rubric" || !expect.rubric?.reference) {
+      throw new Error(`${where}: scout needs kind 'scout', method 'scout+rubric' and rubric/reference files`);
+    }
+    if (Object.keys(raw.stages).length || raw.inject.length || Object.keys(raw.limits).length || raw.part !== undefined) {
+      throw new Error(`${where}: scout cannot run pipeline stages, injections, limits or upstream parts`);
+    }
+    for (const value of [expect.rubric.rubric, expect.rubric.reference]) {
+      const path = resolveResource(root, dir, value);
+      if (!existsSync(path)) problems.push({ caseId: id, problem: `scout judge material not found: ${path}` });
+    }
+  } else if (raw.scout !== undefined) {
+    throw new Error(`${where}: scout options require kind 'scout'`);
   }
 
   return {
@@ -301,9 +334,19 @@ function parseCase(root: string, dir: string, problems: MaterialProblem[]): Suit
     repo: raw.repo,
     taskFile,
     stages: resolveStages(raw.stages, root, dir, id, problems),
+    ...(raw.verification ? { verification: {
+      stages: resolveStages({ workflows: { mode: "preset", resource: raw.verification.resource } }, root, dir, id, problems),
+      inject: raw.verification.inject.map((entry) => {
+        const source = resolveResource(root, dir, entry.source);
+        if (!existsSync(source)) problems.push({ caseId: id, problem: `verification source not found: ${source}` });
+        return { source, dest: entry.dest };
+      }),
+      changedFiles: raw.verification.changedFiles,
+    } } : {}),
     inject,
     limits: raw.limits,
     timeoutMs: raw.timeoutMs ?? null,
+    ...(raw.kind === "scout" ? { scout: ScoutOptionsSchema.parse(raw.scout ?? {}) } : {}),
     expect: {
       ...expect,
       rubric: expect.rubric === undefined ? undefined : {

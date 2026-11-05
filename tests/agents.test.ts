@@ -30,9 +30,9 @@ describe("session tool boundaries", () => {
     expect([...REFACTOR_AGENT_TOOLS].sort()).toEqual(["Bash", "Edit", "Glob", "Grep", "Read", "Write"]);
   });
 
-  test("test-writer session grants file tools, a shell, and Task for the build-writer", () => {
+  test("test-writer currently grants file tools and Task for the build-writer", () => {
     expect([...TEST_WRITER_AGENT_TOOLS].sort()).toEqual([
-      "Bash", "Edit", "Glob", "Grep", "Read", "Task", "Write",
+      "Edit", "Glob", "Grep", "Read", "Task", "Write",
     ]);
   });
 });

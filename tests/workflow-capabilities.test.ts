@@ -1,8 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { probeHost } from "../src/runtime/host-preflight.js";
+import { LocalCapabilityBroker } from "../src/workflow/capabilities.js";
 import { runWorkflow } from "../src/workflow/runner.js";
 
 function tempWorkflow(source: string): { root: string; entry: string } {
@@ -22,6 +23,55 @@ const policy = {
 };
 
 describe("Workflow Capability Context", () => {
+  test("workspace-wide execution still rejects paths and directory links outside the worktree", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rfr-execution-boundary-"));
+    const workspace = join(root, "workspace");
+    const outside = join(root, "outside");
+    mkdirSync(workspace);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "app.exe"), "must never execute");
+    symlinkSync(outside, join(workspace, "linked"), process.platform === "win32" ? "junction" : "dir");
+    const broker = new LocalCapabilityBroker({
+      workspaceRoot: workspace,
+      policy: { readableGlobs: ["**"], executableGlobs: ["**"] },
+    });
+    try {
+      for (const method of ["run", "start"]) {
+        for (const [program, error] of [
+          ["../outside/app.exe", "escapes workspace"],
+          [join(outside, "app.exe"), "absolute executable paths are not allowed"],
+          ["linked/app.exe", "resolves outside workspace"],
+        ] as const) {
+          const response = await broker.handle({
+            type: "capability-request", id: `${method}:${program}`, capability: "process", method,
+            args: [{ program }],
+          });
+          expect(response.ok).toBeFalse();
+          expect(response.error).toContain(error);
+        }
+      }
+    } finally {
+      await broker.close();
+    }
+  });
+
+  test("custom executable policy can still restrict execution to build/", async () => {
+    const root = mkdtempSync(join(tmpdir(), "rfr-execution-policy-"));
+    mkdirSync(join(root, "src"));
+    writeFileSync(join(root, "src", "app.exe"), "must never execute");
+    const broker = new LocalCapabilityBroker({ workspaceRoot: root, policy });
+    try {
+      const response = await broker.handle({
+        type: "capability-request", id: "restricted", capability: "process", method: "run",
+        args: [{ program: "src/app.exe" }],
+      });
+      expect(response.ok).toBeFalse();
+      expect(response.error).toContain("executable is not allowed by executableGlobs");
+    } finally {
+      await broker.close();
+    }
+  });
+
   test("runs allowlisted filesystem and measured compiler capabilities", async () => {
     const { root, entry } = tempWorkflow(`
       export default async ({ fs, process, tools, adapters }) => {
@@ -53,7 +103,7 @@ describe("Workflow Capability Context", () => {
     const result = await runWorkflow({
       entry,
       cwd: root,
-      facts: { host: probeHost(root, { skipCMakeProbe: true }) },
+      facts: { host: probeHost(root) },
       policy,
       timeoutMs: 30_000,
     });
@@ -123,7 +173,7 @@ describe("Workflow Capability Context", () => {
     const result = await runWorkflow({
       entry,
       cwd: root,
-      facts: { host: probeHost(root, { skipCMakeProbe: true }) },
+      facts: { host: probeHost(root) },
       policy,
       timeoutMs: 20_000,
     });

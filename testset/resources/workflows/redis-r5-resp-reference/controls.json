@@ -1,0 +1,30 @@
+{
+  "case": "e2e-redis-r5-resp",
+  "controls": [
+    {
+      "id": "equivalent",
+      "patch": "resources/patches/project-cases/r5-resp/equivalent.patch",
+      "state": "ACCEPTED",
+      "failuresRequired": [],
+      "description": "提取数组长度验证，保留转换失败的短路行为"
+    },
+    {
+      "id": "bulk-length-garbage",
+      "patch": "resources/patches/project-cases/r5-resp/bulk-length-garbage.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "trailing-length-garbage"
+      ],
+      "description": "错误忽略 bulk 长度中的尾部垃圾"
+    },
+    {
+      "id": "reject-empty-bulk",
+      "patch": "resources/patches/project-cases/r5-resp/reject-empty-bulk.patch",
+      "state": "REJECTED",
+      "failuresRequired": [
+        "pipeline-state-reset"
+      ],
+      "description": "错误拒绝合法的空参数"
+    }
+  ]
+}

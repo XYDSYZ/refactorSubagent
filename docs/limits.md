@@ -72,7 +72,7 @@ bun run scripts/e2e-generated-workflow.ts --root R --session s1 \
 
 - **缺失 = 继承**下层。
 - **`null` = 显式抬升**：上层写 `null` 覆盖下层的数字，表示这一项不要限制。
-- 配置文件里的 `null` 只能用于时间预算；资源上限（进程数/字节数）写 `null` 会被拒绝。
+- 时间预算与 `maxTurns` 接受 `null`；资源上限（进程数/字节数）写 `null` 会被拒绝。
 
 ## 4. 键速查
 
@@ -81,7 +81,8 @@ bun run scripts/e2e-generated-workflow.ts --root R --session s1 \
 | `sessions.testWriter.deadlineMs` | test-writer 会话总预算 | `null` |
 | `sessions.refactor.deadlineMs` | refactor 会话总预算 | `null` |
 | `sessions.*.stallMs` | 多久没收到任何 SDK 消息判定流死 | `180000` |
-| `sessions.*.maxTurns` | 最大对话轮次 | 48 / 80 |
+| `sessions.testWriter.maxTurns` | 测试编写会话最大对话轮次；`null` 不向 SDK 传轮数上限 | `null` |
+| `sessions.refactor.maxTurns` | 重构会话最大对话轮次 | `80` |
 | `sessions.*.model` | 该阶段会话用的模型名（网关别名如 `codeagent` 也行）；`null` = 交给 CLI 自己的默认（用户设置 / 环境变量） | `null` |
 | `stages.buildMs` | 单次 BuildWorkflow 在某棵 worktree 上执行 | `null` |
 | `stages.ctestMs` | 单次完整 CTest 套件 | `null` |
@@ -93,7 +94,13 @@ bun run scripts/e2e-generated-workflow.ts --root R --session s1 \
 | `resources.build.maxOutputBytes` | 构建侧单进程输出上限 | `16 MiB` |
 | `resources.build.maxFileBytes` | 构建侧单文件读写上限 | `64 MiB` |
 | `resources.test.*` | 测试侧同上三项 | `4` / `32 MiB` / `64 MiB` |
-| `probes.hostMs` | host 探测每条命令超时（含 CMake 冒烟） | `30000` |
+| `probes.hostMs` | host 探测每条命令超时（含 CMake 元数据查询） | `30000` |
+
+测试编写会话默认不再受原来的 48 轮限制。用户、项目或用例显式配置的数字仍生效；
+需要取消这些覆盖时，将 `sessions.testWriter.maxTurns` 设为 `null`。
+会话总时间预算和无消息检测独立生效。Redis 六例与通信依赖模拟一例已取消原来的 20 分钟会话预算，
+用例将 `sessions.testWriter.deadlineMs` 和 `sessions.refactor.deadlineMs` 显式设为 `null`，覆盖下层配置。
+执行器的单例总超时仍为 90 分钟，单次构建、测试、命令超时及无消息检测分别生效。
 
 ## 5. 查看当前生效值
 

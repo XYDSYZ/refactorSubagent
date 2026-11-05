@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const TERM_GRACE_MS = 200;
@@ -225,7 +226,18 @@ async function terminateOwnedTree(child: ChildProcess, windows: boolean, coopera
   while (Date.now() < until && groupExists(child.pid)) {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
-  if (groupExists(child.pid)) signalGroup(child.pid, "SIGKILL");
+  if (!groupExists(child.pid)) return;
+  signalGroup(child.pid, "SIGKILL");
+  // The root and its pipes may have closed during TERM while descendants kept
+  // running. Sending KILL is asynchronous: wait for the group itself, rather
+  // than treating the root's already-resolved exit/close as acknowledgement.
+  const deadline = performance.now() + EXIT_WAIT_MS;
+  while (groupHasRunningMembers(child.pid)) {
+    if (performance.now() >= deadline) {
+      throw new Error(`process group ${child.pid} still has running members after forced termination (${EXIT_WAIT_MS}ms)`);
+    }
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
 }
 
 function signalGroup(pid: number, signal: NodeJS.Signals): void {
@@ -239,6 +251,28 @@ function groupExists(pid: number): boolean {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
     throw error;
   }
+}
+
+function groupHasRunningMembers(pgid: number): boolean {
+  if (!groupExists(pgid)) return false;
+  if (process.platform !== "linux") return true;
+
+  // kill(-pgid, 0) also sees zombies. They cannot execute or retain pipes;
+  // their adopter, rather than this owner, is responsible for waitpid/reaping.
+  for (const name of readdirSync("/proc")) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try {
+      stat = readFileSync(`/proc/${name}/stat`, "utf8");
+    } catch (error) {
+      if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
+      throw new Error(`cannot confirm shutdown of process group ${pgid}: ${asError(error).message}`, { cause: error });
+    }
+    // comm is parenthesized and may itself contain spaces and parentheses.
+    const [state, , group] = stat.slice(stat.lastIndexOf(") ") + 2).split(" ");
+    if (Number(group) === pgid && state !== "Z" && state !== "X" && state !== "x") return true;
+  }
+  return false;
 }
 
 async function bounded<T>(task: Promise<T>, ms: number): Promise<T | null> {

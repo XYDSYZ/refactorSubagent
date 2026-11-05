@@ -1,3 +1,6 @@
 * text=auto eol=lf
 *.png binary
 *.exe binary
+
+# Patch fixtures preserve context whitespace from the pinned upstream source.
+testset/resources/patches/project-cases/**/*.patch -whitespace

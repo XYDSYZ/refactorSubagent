@@ -1,0 +1,11 @@
+{
+  "builds": [
+    {
+      "id": "redis-r1-sds-reference",
+      "entry": "../project-reference/build-workflow.ts"
+    }
+  ],
+  "testEntry": "../project-reference/test-workflow.ts",
+  "workflowId": "redis-r1-sds-reference",
+  "revision": 1
+}

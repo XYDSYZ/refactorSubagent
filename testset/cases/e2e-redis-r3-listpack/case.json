@@ -1,0 +1,74 @@
+{
+  "id": "e2e-redis-r3-listpack",
+  "title": "listpack 连续修改：AI 编写验证 + AI 重构 + 独立复核",
+  "subject": "e2e",
+  "tags": [
+    "ai",
+    "e2e",
+    "project-evaluation",
+    "redis",
+    "r3-listpack"
+  ],
+  "kind": "pipeline",
+  "requires": {
+    "platforms": [
+      "linux"
+    ],
+    "tools": [
+      "git",
+      "gcc",
+      "make",
+      "bash"
+    ]
+  },
+  "prepare": "../../resources/projects/redis/prepare.ts",
+  "repo": ".",
+  "task": "resources/tasks/redis-r3-listpack.task.txt",
+  "stages": {
+    "workflows": {
+      "mode": "ai"
+    },
+    "refactor": {
+      "mode": "ai"
+    }
+  },
+  "verification": {
+    "resource": "workflows/redis-r3-listpack-reference",
+    "inject": [
+      {
+        "source": "resources/judge/redis-8.10.3/r3-listpack",
+        "dest": "refactor-task/reference"
+      },
+      {
+        "source": "resources/judge/project-support",
+        "dest": "refactor-task/reference/support"
+      }
+    ],
+    "changedFiles": [
+      "src/listpack.c"
+    ]
+  },
+  "expect": {
+    "method": "verdict+rubric",
+    "state": "ACCEPTED",
+    "injectedStages": [],
+    "authoritative": true,
+    "failuresExact": [],
+    "requireFiles": [
+      ".refactor/runs/{session}/workflows/test/test-workflow.ts"
+    ],
+    "rubric": {
+      "rubric": "resources/project-evaluation/rubric.md",
+      "reference": "resources/workflows/redis-r3-listpack-reference/reference.md"
+    },
+    "note": "独立判据已由固定正反对照校准；真实 AI 全流程须另行运行。"
+  },
+  "limits": {
+    "sessions.testWriter.deadlineMs": null,
+    "sessions.refactor.deadlineMs": null,
+    "stages.buildMs": 360000,
+    "stages.testWorkflowMs": 210000,
+    "commands.processMs": 180000
+  },
+  "timeoutMs": 5400000
+}

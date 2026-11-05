@@ -1,0 +1,11 @@
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -1768,7 +1768,7 @@
+         while(he) {
+             const void *he_key = dictStoredKey2Key(d, dictGetKey(he));            
+             if (key == he_key || cmpFunc(&cmpCache, key, he_key)) {
+-                if (existing) *existing = he;
++                if (existing) *existing = NULL;
+                 return NULL;
+             }
+             he = dictGetNext(he);

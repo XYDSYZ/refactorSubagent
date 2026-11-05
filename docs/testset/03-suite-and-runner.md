@@ -460,16 +460,20 @@ bun testset/run.ts --subject judgement --tag offline --concurrency 4 --build-cac
   能"挂起"的用例（`run_once`、`loop_close`、`walk_handles`、`timer_run_once`、`idle_check` 等）**故意不声明**：
   在 Windows 上 libuv 自带 runner 超时后并不会杀掉子进程（`test/runner.c:269` 的注释假设它杀了，
   `test/runner-win.c:205-207` 只返回 `WAIT_TIMEOUT`），挂起的子进程会一直持有继承来的 stdout 句柄，
-  宿主就会一直等下去（判据挂死到用例超时）。这些语义改由 oracle 覆盖——oracle 是被写成"失败"而不是"挂起"的。
-  这条是实测踩出来的：H6 的变异体第一次就是把判据挂住的那个组合（见 §11.4）。
+  宿主就会一直等下去（判据挂死到用例超时）。这些语义改由 oracle 覆盖，设计目标是报告失败并退出。
+  这条是实测踩出来的：H6 的变异体第一次就是把判据挂住的那个组合（见 §11.5）。
 - 用例成对出现：`refactor-h<k>-*`（AI 档，判定能力）+ `judgement-mutant-h<k>-*`（离线档，0 模型成本，证明 oracle 有牙）。
-- 共享判据的代价：一个变异可能同时触发别的目标的 oracle（H6 的变异也点亮了 `h4-walk/oracle_walk`），
+- 共享判据的代价：一个变异可能同时触发别的目标的 oracle（H6 原始变异曾影响 `h4-walk/oracle_walk`），
   所以失配集是"按声明"归因，不是"按目标"归因；`failuresRequired` 只钉住本目标的 oracle 三件套。
+  H6 于 2026-11-03 收敛为单一的回调顺序错误，避免破坏资源回收时的等待条件，见 §11.8。
 
 ### 11.3 离线 mutant 实测（判据牙齿）
 
 每条 mutant 都是"看起来像合理清理"的改法，跑法与旧 `judgement-mutant-*` 一致
 （`stages.refactor.mode = patch`，判据冻结）。
+
+下表保留 2026-09-21 的校准记录；H6 原始变异包含超时后才结束的检查，不能作为当前宿主的有效比较证据。
+其修正后的变异和验证结果见 §11.8。
 
 | 用例 | mutant 改了什么 | 结果 | 失配数 |
 |---|---|---|---|
@@ -526,9 +530,10 @@ H6 的变异体（改 `uv_backend_timeout` 守卫）在首次验证时把**整�
 - 于是挂起的子进程活下来，继续持有 runner 的 stdout/stderr 句柄；宿主的 `ctx.process.run` 等的是
   "进程结束 + 管道关闭"，管道永不关闭 ⇒ 判据卡死到用例超时（本档 `timeoutMs` 是 3600 s）。
 
-因此**能挂起的上游用例不得进判据**（§11.2 的清单就是这么定的）。挂起只可能由"候选把事件循环的
-睡眠逻辑改坏"触发——而这正是 H6 的题面，所以要靠 oracle 覆盖同一条语义（`oracle_loop` 用 watchdog
-定时器把自己从死等里拉出来，失败而不是挂起）。
+因此本档避免选入会挂起的上游用例（§11.2 的清单就是这么定的），改由 oracle 检查相应语义。
+`oracle_loop` 的部分等待有 watchdog 定时器，但它仍依赖被测事件循环；共享的 `oracle_walk`
+在关闭资源时也会调用 `uv_run`。这不能保证任意事件循环变异都能自行退出，2026-11-03 的 CI
+就发现原始 H6 变异令 `oracle_walk` 超时，当前修正见 §11.8。
 
 ### 11.6 宿主侧的两条同源缺陷（本轮顺带确认，尚未修）
 
@@ -571,3 +576,36 @@ H6 的变异体（改 `uv_backend_timeout` 守卫）在首次验证时把**整�
    现在两个 13 分钟的会话说明预算给得极宽，测的是"肯不肯干"而不是"能不能干"。
 4. **多维约束同时满足**：行为 + 分配次数（h5 的 oracle 已经装了分配器钩子）/ 构建产物形状 / 调用次数。
 5. **blind 档**：模型自建判据（`e2e-t1-blind` 的形态），当前 0.63 的裁判分是唯一真正的区分点。
+
+### 11.8 H6 错误补丁收敛与 Windows 重跑（2026-11-03）
+
+PR #4 的 Windows CI 中，原始 H6 补丁同时删掉 `uv_backend_timeout` 守卫和 `uv_run`
+首轮定时器处理。前者使 `oracle_walk` 在关闭资源时无限等待，宿主在约 120 秒后终止它，
+按当前的无效执行检查中止流程，得到 `ABORTED`。旧校准曾将超时后的不完整输出也纳入比较，
+不能用那次 `REJECTED` 证明检查完整执行。
+
+现在补丁只保留后一个错误：认为循环体末尾已处理定时器，删掉进入循环前的兼容逻辑。
+这是一个可定位的行为错误：零延时定时器原本先于 prepare/check 回调执行（`TPC`），
+改后变为 `PCT`。等待条件保持完整，资源回收可以结束；预期继续是 `REJECTED`。
+
+Windows 本机重跑：
+
+```text
+bun testset/run.ts --only judgement-accept-hard,judgement-mutant-h6-loop --concurrency 2 --strict-env --out runs/h6-order-20261103-r2 --no-color
+```
+
+| 检查 | 实测结果 |
+|---|---|
+| 正对照 `judgement-accept-hard` | `ACCEPTED`，0 差异，约 3 分 10 秒 |
+| 错误补丁 `judgement-mutant-h6-loop` | `REJECTED`，6 条差异，约 3 分 10 秒 |
+| 错误补丁的 `oracle_walk` | 191 ms，退出码 0，`total_failures=0` |
+| 错误补丁的 `oracle_loop` | 160 ms，退出码 1，唯一失败为 `TPC` → `PCT` |
+| 错误补丁的上游 `close_order` | 508 ms，退出码 3：check 回调执行时定时器回调次数为 0，预期 1 |
+| 两例的进程执行 | 84 次均为 `exited`，无超时、输出截断或启动错误；两侧构建均通过 |
+
+6 条差异是 `close_order` 的 exit/tap/stdout 和 H6 oracle 的 exit/summary/stdout，
+已更新 `case.json` 的实测集合，仍要求 H6 三项差异全部出现。oracle、共享测试脚本和宿主判定规则均未改动。
+两例并行运行，整批约 3 分 10 秒，不能据此推算远端整套 CI 的耗时。
+
+首跑证据保留于 `runs/h6-order-20261103`：两例都在基线构建成功后因 `uv_run_tests_a.exe`
+缺失而中止，尚未执行错误补丁。用户说明有误删情况后使用新目录重跑；上述结果均来自第二次运行。

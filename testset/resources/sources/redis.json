@@ -1,0 +1,8 @@
+{
+  "id": "redis",
+  "repo": "../runs/redis-feasibility-20261028/redis",
+  "remote": "https://github.com/redis/redis.git",
+  "ref": "8.10.3",
+  "commit": "1a2574ce1551d3de6e0b4a56756c0fdbc6659e4f",
+  "note": "Official fixed Redis 8.10.3 source; Linux evaluation. Local checkout is optional, remote is the fallback."
+}

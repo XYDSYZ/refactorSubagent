@@ -34,8 +34,10 @@ export interface RubricOptions {
   readonly command: readonly string[] | null;
   readonly caseId: string;
   readonly caseDir: string;
-  /** Session root the runner handed the harness (`.refactor/runs` lives here). */
+  /** Session evidence root; legacy runs also persisted writer sources here. */
   readonly sessionRoot: string;
+  /** Prepared repository, where current authoring sessions persist sources. */
+  readonly repoDir?: string;
   readonly sessionId: string;
   readonly rubricPath: string;
   readonly referencePath: string | null;
@@ -94,18 +96,17 @@ function contents(path: string, limit = 20000): string {
 }
 
 /** Everything the writer produced, wherever the harness persisted it. */
-export function writerArtifacts(sessionRoot: string, sessionId: string): { testSource: string; buildSources: string[] } {
-  // The harness persists run-local workflows under
-  // `<sessionRoot>/.refactor/runs/<session>/workflows/{test,build}`.
-  const workflowsRoot = join(sessionRoot, ".refactor", "runs", sessionId, "workflows");
-  const testDir = join(workflowsRoot, "test");
+export function writerArtifacts(sessionRoot: string, sessionId: string, repoDir?: string): { testSource: string; buildSources: string[] } {
+  const roots = [...new Set([sessionRoot, ...(repoDir ? [repoDir] : [])])];
+  const workflows = roots.map(root => join(root, ".refactor", "runs", sessionId, "workflows"));
+  const testSources = workflows.map(root => join(root, "test", "test-workflow.ts"));
   // Run-local build workflows live next to the test workflow (one .ts plus a
   // .description.json sidecar per entry).
-  const buildDirs = [
-    join(workflowsRoot, "build"),
-    join(sessionRoot, ".refactorsa", "build-workflows"),
-    join(sessionRoot, ".refactor", "build-workflows"),
-  ];
+  const buildDirs = roots.flatMap((root, index) => [
+    join(workflows[index]!, "build"),
+    join(root, ".refactorsa", "build-workflows"),
+    join(root, ".refactor", "build-workflows"),
+  ]);
   const buildSources: string[] = [];
   for (const dir of buildDirs) {
     if (!existsSync(dir)) continue;
@@ -116,7 +117,7 @@ export function writerArtifacts(sessionRoot: string, sessionId: string): { testS
       if (direct.endsWith(".ts") && statSync(direct).isFile()) buildSources.push(direct);
     }
   }
-  return { testSource: join(testDir, "test-workflow.ts"), buildSources };
+  return { testSource: testSources.find(existsSync) ?? testSources[0]!, buildSources };
 }
 
 /** Declaration pairs the host compared, plus how they were asserted (relation histogram). */
@@ -195,6 +196,18 @@ export function programmaticEvidence(c: SuiteCase, run: PipelineRunResult): stri
   if (run.injectionReplaced.length > 0) lines.push(`Injection replaced pre-existing files at:${list(run.injectionReplaced, 10)}`);
   if (run.harnessPhase !== "") lines.push(`Last harness phase: ${run.harnessPhase}`);
   if (run.error !== null) lines.push(`Harness error: ${run.error}`);
+  if (c.verification) {
+    const verification = run.independentVerification;
+    lines.push("", "### Independent verification of the saved candidate",
+      `Status: ${verification?.status ?? "missing"} · ${verification?.detail ?? "no evidence"}`);
+    if (verification) {
+      lines.push(`Changed files:${list(verification.changedFiles, 40)}`,
+        `Independent state: ${verification.state ?? "not run"}`,
+        `Independent mismatches:${list(verification.mismatches, 40)}`);
+    }
+    const candidate = join(run.sessionRoot, "..", "independent", "candidate.patch");
+    lines.push("Saved candidate patch (not a fixed control):", "```diff", contents(candidate, 24000), "```");
+  }
 
   const refactor = c.stages["refactor"];
   const patchFile = refactor === undefined ? undefined : refactor["patchFile"];
@@ -225,24 +238,34 @@ export function programmaticEvidence(c: SuiteCase, run: PipelineRunResult): stri
 
 export async function runRubric(options: RubricOptions): Promise<RubricOutcome> {
   const promptPath = join(options.caseDir, "rubric-prompt.md");
-  const artifacts = writerArtifacts(options.sessionRoot, options.sessionId);
+  const artifacts = writerArtifacts(options.sessionRoot, options.sessionId, options.repoDir);
   const body: string[] = [PROMPT_HEADER, "## Rubric", options.rubricPath === "" ? "(none)" : contents(options.rubricPath, 40000)];
   if (options.evidence !== "") body.push("## Programmatic evidence (host-executed, before this scoring)", options.evidence);
   body.push("## Candidate: declared test workflow");
   body.push("```ts\n" + contents(artifacts.testSource) + "\n```");
   body.push("## Candidate: declared build workflow(s)");
-  for (const path of artifacts.buildSources) body.push(`### ${path}\n\`\`\`ts\n${contents(path)}\n\`\`\``);
+  for (const path of artifacts.buildSources) {
+    body.push(`### ${path}\n\`\`\`ts\n${contents(path)}\n\`\`\``);
+    if (existsSync(`${path}.materials.json`)) {
+      body.push(`Registered fixed helper sources for ${path}\n\`\`\`json\n${contents(`${path}.materials.json`, 60000)}\n\`\`\``);
+    }
+  }
   if (artifacts.buildSources.length === 0) body.push("(none persisted)");
   if (options.referencePath !== null) {
     body.push("## Hidden reference (not visible to the candidate)");
-    body.push(listing(options.referencePath));
-    const entry = join(options.referencePath, "test-workflow.ts");
-    if (existsSync(entry)) body.push("```ts\n" + contents(entry, 20000) + "\n```");
+    if (existsSync(options.referencePath) && statSync(options.referencePath).isFile()) {
+      body.push(contents(options.referencePath, 40000));
+    } else {
+      body.push(listing(options.referencePath));
+      const entry = join(options.referencePath, "test-workflow.ts");
+      if (existsSync(entry)) body.push("```ts\n" + contents(entry, 20000) + "\n```");
+    }
   }
   ensureDir(options.caseDir);
   writeFileSync(promptPath, body.join("\n\n"), "utf8");
 
-  if (options.command === null || options.command.length === 0) {
+  const execution = await executeRubricCommand({ ...options, promptPath });
+  if (execution === null) {
     return {
       status: "pending",
       score: null,
@@ -252,34 +275,18 @@ export async function runRubric(options: RubricOptions): Promise<RubricOutcome> 
     };
   }
 
-  // The prompt goes in on stdin: that is what `claude -p` (and most scriptable
-  // model CLIs) read, and it keeps the command line free of quoting games.
-  const result = await exec({
-    program: options.command[0]!,
-    args: [...options.command.slice(1)],
-    cwd: options.caseDir,
-    timeoutMs: options.timeoutMs,
-    stdin: readFileSync(promptPath, "utf8"),
-    // A user-supplied command line goes through the shell: on Windows the model
-    // CLI is a .cmd shim, which spawn() cannot execute directly.
-    shell: true,
-    env: { RUBRIC_PROMPT_FILE: promptPath, RUBRIC_CASE: options.caseId },
-  });
-  writeFileSync(join(options.caseDir, "rubric.stdout.txt"), result.stdout, "utf8");
-  writeFileSync(join(options.caseDir, "rubric.stderr.txt"), result.stderr, "utf8");
-  if (result.status !== "exited" || result.exitCode !== 0) {
+  if (execution.error !== null) {
     return {
       status: "failed", score: null,
-      detail: `rubric command failed: ${result.status} exit=${String(result.exitCode)} ` +
-        `${(result.error ?? result.stderr ?? result.stdout).trim().slice(-300)}`,
+      detail: execution.error,
       promptPath, criteria: [],
     };
   }
-  const parsed = extractScoring(result.stdout);
+  const parsed = extractScoring(execution.stdout);
   if (parsed === null) {
     return {
       status: "failed", score: null,
-      detail: `rubric produced no parseable JSON (first 200 chars: ${result.stdout.trim().slice(0, 200)})`,
+      detail: `rubric produced no parseable JSON (first 200 chars: ${execution.stdout.trim().slice(0, 200)})`,
       promptPath, criteria: [],
     };
   }
@@ -295,6 +302,28 @@ export async function runRubric(options: RubricOptions): Promise<RubricOutcome> 
       (parsed.summary === undefined ? "" : ` — ${parsed.summary.slice(0, 200)}`),
     promptPath,
     criteria: parsed.criteria ?? [],
+  };
+}
+
+/** Only process transport is shared. Each evaluator owns its prompt and validation. */
+export async function executeRubricCommand(options: {
+  command: readonly string[] | null; caseDir: string; caseId: string;
+  timeoutMs: number; promptPath: string;
+}): Promise<{ stdout: string; error: string | null } | null> {
+  if (!options.command?.length) return null;
+  const result = await exec({
+    program: options.command[0]!, args: [...options.command.slice(1)],
+    cwd: options.caseDir, timeoutMs: options.timeoutMs,
+    stdin: readFileSync(options.promptPath, "utf8"), shell: true,
+    env: { RUBRIC_PROMPT_FILE: options.promptPath, RUBRIC_CASE: options.caseId },
+  });
+  writeFileSync(join(options.caseDir, "rubric.stdout.txt"), result.stdout, "utf8");
+  writeFileSync(join(options.caseDir, "rubric.stderr.txt"), result.stderr, "utf8");
+  return {
+    stdout: result.stdout,
+    error: result.status === "exited" && result.exitCode === 0 ? null :
+      `rubric command failed: ${result.status} exit=${String(result.exitCode)} ` +
+        (result.error ?? result.stderr ?? result.stdout).trim().slice(-300),
   };
 }
 
