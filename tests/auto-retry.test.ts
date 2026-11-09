@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { parseCliArgs } from "../src/cli/args.js";
+import { join } from "node:path";
 import {
   composeGiveUpReport,
   composeRetryTask,
@@ -20,6 +22,7 @@ function fakeResult(options: {
   state: string;
   mismatches?: readonly BehaviorMismatch[];
   sessionId?: string;
+  authoritative?: boolean;
 }): StageFlowResult {
   return {
     state: options.state,
@@ -50,7 +53,10 @@ function fakeResult(options: {
             } as never)
           : null,
     },
-    provenance: { injected: [], verification_authoritative: true },
+    provenance: {
+      injected: [],
+      verification_authoritative: options.authoritative ?? true,
+    },
     failure: null,
     logDir: "D:\\fake\\log",
     store: {} as never,
@@ -59,20 +65,28 @@ function fakeResult(options: {
 
 function makeConfig(
   script: readonly { state: string; mismatches?: readonly BehaviorMismatch[] }[],
-  captured: { tasks: string[]; notifications: string[] },
+  captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] },
   maxRetries = 2,
 ): AutoRetryConfig {
   let call = 0;
+  const fakeStage = (() => {
+    throw new Error("pinned workflows stage must not execute inside the retry loop test");
+  }) as never;
   return {
     baseTask: "重构 statkit 的 CSV 解析实现",
     maxRetries,
-    runRound: async (round, task, sessionId) => {
+    runRound: async (round, task, sessionId, pinned) => {
       captured.tasks.push(`r${round}:${sessionId}:${task}`);
+      captured.pinned.push(pinned ?? null);
       const step = script[Math.min(call, script.length - 1)]!;
       call++;
       return fakeResult({ ...step, sessionId });
     },
     makeSessionId: (round) => (round === 1 ? "run-base" : `run-base-r${round}`),
+    pinWorkflows: (firstRoundSessionId) => {
+      captured.pinCalls.push(firstRoundSessionId);
+      return fakeStage;
+    },
     notify: (message) => captured.notifications.push(message),
   };
 }
@@ -112,7 +126,8 @@ describe("composeRetryTask", () => {
 
 describe("runWithAutoRetry", () => {
   test("an ACCEPTED first round never retries", async () => {
-    const captured: { tasks: string[]; notifications: string[] } = { tasks: [], notifications: [] };
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
     const outcome = await runWithAutoRetry(makeConfig([{ state: "ACCEPTED" }], captured));
     expect(outcome.stoppedBecause).toBe("accepted");
     expect(outcome.rounds).toHaveLength(1);
@@ -121,7 +136,8 @@ describe("runWithAutoRetry", () => {
   });
 
   test("a REJECTED round feeds its diffs to the next round; acceptance stops the loop", async () => {
-    const captured: { tasks: string[]; notifications: string[] } = { tasks: [], notifications: [] };
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
     const outcome = await runWithAutoRetry(
       makeConfig([{ state: "REJECTED", mismatches: MISMATCH_A }, { state: "ACCEPTED" }], captured),
     );
@@ -134,7 +150,8 @@ describe("runWithAutoRetry", () => {
   });
 
   test("two identical signatures in a row stop the loop with a plain-language report", async () => {
-    const captured: { tasks: string[]; notifications: string[] } = { tasks: [], notifications: [] };
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
     const outcome = await runWithAutoRetry(
       makeConfig(
         [
@@ -155,7 +172,8 @@ describe("runWithAutoRetry", () => {
   });
 
   test("exhausting the allowed retries stops with a distinct report", async () => {
-    const captured: { tasks: string[]; notifications: string[] } = { tasks: [], notifications: [] };
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
     const outcome = await runWithAutoRetry(
       makeConfig(
         [
@@ -172,13 +190,60 @@ describe("runWithAutoRetry", () => {
     expect(report).toContain("用完您允许的重试次数（1 次）");
   });
 
+  test("pins round 1's exam for every retry round (loaded once from its checkpoint)", async () => {
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
+    const outcome = await runWithAutoRetry(
+      makeConfig(
+        [
+          { state: "REJECTED", mismatches: MISMATCH_A },
+          { state: "REJECTED", mismatches: MISMATCH_B },
+          { state: "ACCEPTED" },
+        ],
+        captured,
+        2,
+      ),
+    );
+    expect(outcome.stoppedBecause).toBe("accepted");
+    // The exam loader ran exactly once, against round 1's session.
+    expect(captured.pinCalls).toEqual(["run-base"]);
+    // Round 1 used the caller's own stage source; rounds 2-3 used the pin.
+    expect(captured.pinned[0]).toBeNull();
+    expect(captured.pinned[1]).not.toBeNull();
+    expect(captured.pinned[2]).not.toBeNull();
+    expect(captured.notifications.join("\n")).toContain("考卷沿用第 1 轮的版本");
+  });
+
+  test("two consecutive REJECTED rounds without any structured diff still stop as a loop", async () => {
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
+    const outcome = await runWithAutoRetry(
+      makeConfig([{ state: "REJECTED" }, { state: "REJECTED" }], captured, 2),
+    );
+    expect(outcome.stoppedBecause).toBe("loop-detected");
+    expect(outcome.rounds).toHaveLength(2); // empty signatures count as identical
+    expect(outcome.rounds[0]!.signature).toBeNull();
+    expect(captured.tasks).toHaveLength(2);
+  });
+
   test("an ABORTED round stops immediately and points the user at --resume", async () => {
-    const captured: { tasks: string[]; notifications: string[] } = { tasks: [], notifications: [] };
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
     const config = makeConfig([{ state: "ABORTED" }], captured);
     const outcome = await runWithAutoRetry(config);
     expect(outcome.stoppedBecause).toBe("aborted");
     expect(captured.tasks).toHaveLength(1); // no retry after an abort
     expect(captured.notifications.join("\n")).toContain("--resume run-base");
+  });
+
+  test("a non-authoritative verdict never triggers retries", async () => {
+    const captured: { tasks: string[]; notifications: string[]; pinned: (unknown | null)[]; pinCalls: string[] } =
+      { tasks: [], notifications: [], pinned: [], pinCalls: [] };
+    const script = { state: "REJECTED", mismatches: MISMATCH_A, authoritative: false };
+    const outcome = await runWithAutoRetry(makeConfig([script], captured, 2));
+    expect(outcome.stoppedBecause).toBe("non-authoritative");
+    expect(captured.tasks).toHaveLength(1); // chasing a fake verifier is forbidden
+    expect(captured.notifications.join("\n")).toContain("不权威");
   });
 });
 
@@ -194,8 +259,21 @@ describe("composeGiveUpReport", () => {
     );
     expect(report).toContain("第 1 轮");
     expect(report).toContain("csv[0].mean.stdout");
-    expect(report).toContain("L2\\artifacts\\expectation-comparison-result.json");
+    expect(report).toContain(join("L2", "artifacts", "expectation-comparison-result.json"));
     // No passive "被检测/被停止" constructions for the verdict sentence.
     expect(report).toContain("我主动停止了");
   });
 });
+
+describe("--auto-retry parsing", () => {
+  test("defaults to 0 (disabled) and accepts an explicit 0", () => {
+    const defaults = parseCliArgs(["run", ".", "--task", "t"]);
+    expect(defaults.kind === "run" && defaults.autoRetry).toBe(0);
+    const explicitZero = parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "0"]);
+    expect(explicitZero.kind === "run" && explicitZero.autoRetry).toBe(0);
+    const three = parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "3"]);
+    expect(three.kind === "run" && three.autoRetry).toBe(3);
+    expect(() => parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "-1"])).toThrow(/non-negative/);
+  });
+});
+

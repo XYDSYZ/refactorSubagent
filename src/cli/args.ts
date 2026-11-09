@@ -192,7 +192,7 @@ function parseRun(args: string[]): RunCommand {
       continue;
     }
     if (arg === "--auto-retry") {
-      autoRetry = parsePositiveInteger(nextValue(args, ++index, "--auto-retry"), "--auto-retry");
+      autoRetry = parseNonNegativeInteger(nextValue(args, ++index, "--auto-retry"), "--auto-retry");
       continue;
     }
     if (arg === "--format") {
@@ -354,6 +354,15 @@ function parsePositiveInteger(value: string, option: string): number {
   return parsed;
 }
 
+/** Like parsePositiveInteger but accepts 0 (e.g. --auto-retry 0 disables retrying). */
+function parseNonNegativeInteger(value: string, option: string): number {
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw new CliUsageError(`${option} must be a non-negative integer`);
+  }
+  return parsed;
+}
+
 function parseFormat(value: string): CliFormat {
   if (value === "human" || value === "json") return value;
   throw new CliUsageError(`format must be 'human' or 'json', got '${value}'`);
@@ -383,6 +392,17 @@ Resume (checkpoint restart):
                               (workflow sources, candidate branch, unchanged
                               repo HEAD) are reused; verification always re-runs.
                               The new session id defaults to <id>-resume.
+
+Auto-retry (after a REJECTED verdict):
+  --auto-retry <max>          When the verdict is REJECTED, run up to <max>
+                              more FRESH sessions. Each retry appends the
+                              previous round's per-expectation behavior diffs
+                              to the task and re-runs the SAME round-1 exam
+                              (loaded from its checkpoint), so rounds stay
+                              comparable. Stops on ACCEPTED, on two identical
+                              consecutive failure signatures, on ABORTED, and
+                              on non-authoritative verification; every stop
+                              prints a plain-language report. 0 disables.
 
 Stage sources (accepted by "run"), later wins:
   --pipeline-file <path>      Extra pipeline layer, merged in order (repeatable)

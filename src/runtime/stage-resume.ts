@@ -15,6 +15,7 @@ import {
   type StageFlow,
   type StageFlowResult,
   type StageName,
+  type WorkflowsStage,
 } from "./stage-flow.js";
 import {
   existingBranchPrepareStage,
@@ -135,6 +136,46 @@ const RefactorCheckpointData = z.object({
   commit_sha: z.string().min(1),
   summary: z.string(),
 });
+
+/**
+ * Rebuild the PINNED workflows stage from a session's workflows checkpoint —
+ * the same exam the source run used. Auto-retry needs this: every retry round
+ * must run the identical test workflow, otherwise two rounds' failure
+ * signatures are not comparable and loop detection breaks down.
+ *
+ * Returns null when the checkpoint is missing, malformed, or its sources no
+ * longer verify on disk — the caller then falls back to its own stage source.
+ */
+export function loadReusableWorkflowsStage(
+  repoPath: string,
+  sessionRoot: string,
+  sourceSessionId: string,
+): WorkflowsStage | null {
+  let checkpoints: readonly StageCheckpoint[];
+  try {
+    const store = SessionStore.open(sessionRoot, sourceSessionId);
+    const loaded = loadStageCheckpoints(store.sessionDir);
+    if (loaded.error !== null) return null;
+    checkpoints = loaded.checkpoints;
+  } catch {
+    // The whole session archive is gone (deleted/cleaned) — nothing to pin.
+    return null;
+  }
+  const entry = checkpointOf(checkpoints, "workflows");
+  if (entry === null) return null;
+  const parsed = WorkflowsCheckpointData.safeParse(entry.data);
+  if (!parsed.success) return null;
+  const entryRoot = parsed.data.entry_root ?? repoPath;
+  const sources = [parsed.data.test_entry, ...parsed.data.builds.map((b) => b.entry)];
+  if (sources.some((source) => !existsSync(join(entryRoot, source)))) return null;
+  return presetWorkflowsStage({
+    builds: parsed.data.builds.map((b) => ({ id: b.id, entry: b.entry, runLocal: b.run_local })),
+    testEntry: parsed.data.test_entry,
+    workflowId: parsed.data.workflow_id,
+    revision: parsed.data.workflow_revision,
+    ...(parsed.data.entry_root !== undefined ? { entryRoot: parsed.data.entry_root } : {}),
+  });
+}
 
 /**
  * Decide what the resume can reuse, WITHOUT executing anything. Throws only

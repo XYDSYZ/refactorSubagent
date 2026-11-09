@@ -1,4 +1,5 @@
-import type { StageFlowResult } from "./stage-flow.js";
+import { join } from "node:path";
+import type { StageFlowResult, WorkflowsStage } from "./stage-flow.js";
 
 /**
  * auto-retry — bounded, program-orchestrated re-runs after a REJECTED verdict.
@@ -15,9 +16,14 @@ import type { StageFlowResult } from "./stage-flow.js";
  * Guardrails (why this does not decay into verifier-gaming):
  *   - hard round cap (caller-provided maxRetries)
  *   - every round is a brand-new session with no memory except the lesson
+ *   - the exam is PINNED: retry rounds run the FIRST round's test workflow
+ *     (loaded from its checkpoint), so failure signatures stay comparable
+ *     across rounds — re-authoring the exam per round would break loop
+ *     detection and re-spend the authoring session
  *   - the lesson lists WHAT drifted, never HOW the checker works
- *   - identical failure signature on consecutive rounds → stop: the AI is
- *     stuck in a loop and further rounds only burn budget
+ *   - identical failure signature on consecutive rounds (including two
+ *     rounds with NO structured diff at all) → stop: the AI is stuck in a
+ *     loop and further rounds only burn budget
  *   - ABORTED never retries (different failure class — the user's --resume
  *     path owns environment/host failures)
  *
@@ -44,6 +50,7 @@ export type AutoRetryStopReason =
   | "aborted"
   | "loop-detected"
   | "rounds-exhausted"
+  | "non-authoritative"
   | "no-verdict";
 
 export interface AutoRetryOutcome {
@@ -60,10 +67,20 @@ export interface AutoRetryConfig {
   readonly baseTask: string;
   /** Maximum ADDITIONAL rounds after the first one (0 = no retry). */
   readonly maxRetries: number;
-  /** Run one round. The module owns task composition and session ids. */
-  readonly runRound: (round: number, task: string, sessionId: string) => Promise<StageFlowResult>;
+  /** Run one round. The module owns task composition and session ids; the
+   *  caller merges `pinned` into its flow so the round reuses round 1's exam
+   *  (null = fall back to the caller's own workflows stage). */
+  readonly runRound: (
+    round: number,
+    task: string,
+    sessionId: string,
+    pinnedWorkflows: WorkflowsStage | null,
+  ) => Promise<StageFlowResult>;
   /** Session id for a round (round 1 keeps the caller's base id). */
   readonly makeSessionId: (round: number) => string;
+  /** Load round 1's workflows stage from its checkpoint, so every retry runs
+   *  the identical exam. Called at most once; null = pin unavailable. */
+  readonly pinWorkflows?: (firstRoundSessionId: string) => WorkflowsStage | null;
   /** Progress / final notifications, in plain language. */
   readonly notify: (message: string) => void;
 }
@@ -136,7 +153,9 @@ export function composeGiveUpReport(rounds: readonly RetryRoundRecord[], stopped
   }
   lines.push("建议您按下面三步继续：");
   if (last !== undefined) {
-    lines.push(`1. 打开判决书查看逐条差异：${last.logDir}\\artifacts\\expectation-comparison-result.json；`);
+    lines.push(
+      `1. 打开判决书查看逐条差异：${join(last.logDir, "artifacts", "expectation-comparison-result.json")}；`,
+    );
   } else {
     lines.push("1. 查看运行日志目录下的 expectation-comparison-result.json；");
   }
@@ -150,6 +169,7 @@ export async function runWithAutoRetry(config: AutoRetryConfig): Promise<AutoRet
   const rounds: RetryRoundRecord[] = [];
   let previousSignature: string | null = null;
   let previousMismatches: readonly BehaviorMismatch[] = [];
+  let pinned: WorkflowsStage | null = null;
 
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
     const round = attempt + 1;
@@ -159,11 +179,12 @@ export async function runWithAutoRetry(config: AutoRetryConfig): Promise<AutoRet
       : composeRetryTask(config.baseTask, round, previousMismatches);
     if (attempt > 0) {
       config.notify(
-        `第 ${String(round)} 轮重试开始：我把上一轮的 ${String(previousMismatches.length)} 条失败差异写进了任务描述。`,
+        `第 ${String(round)} 轮重试开始：我把上一轮的 ${String(previousMismatches.length)} 条失败差异写进了任务描述；` +
+          `考卷沿用第 1 轮的版本，保证各轮的差异可以互相比较。`,
       );
     }
 
-    const result = await config.runRound(round, task, sessionId);
+    const result = await config.runRound(round, task, sessionId, attempt > 0 ? pinned : null);
     const mismatches = extractMismatches(result);
     const signature = signatureOf(mismatches);
     rounds.push({
@@ -200,7 +221,21 @@ export async function runWithAutoRetry(config: AutoRetryConfig): Promise<AutoRet
       return { result, rounds, stoppedBecause: "no-verdict", report: "" };
     }
 
-    if (attempt > 0 && signature !== null && signature === previousSignature) {
+    if (result.provenance.verification_authoritative === false) {
+      config.notify(
+        [
+          `第 ${String(round)} 轮的验证被替换成了非权威实现（verification_authoritative: false）。`,
+          "对着一道不权威的判决重试没有意义，还可能教会 AI 迎合假验证器，所以我停止了重试。",
+          "如果这是您有意注入的测试配置，请改用权威验证后再运行。",
+        ].join("\n"),
+      );
+      return { result, rounds, stoppedBecause: "non-authoritative", report: "" };
+    }
+
+    // Loop brake: consecutive rounds failing on the SAME set of behaviors
+    // (null signature = no structured diff at all) means the AI is stuck —
+    // the exam is pinned, so an unchanged signature cannot come from the exam.
+    if (attempt > 0 && signature === previousSignature) {
       const report = composeGiveUpReport(rounds, "loop-detected", config.maxRetries);
       config.notify(report);
       return { result, rounds, stoppedBecause: "loop-detected", report };
@@ -214,6 +249,10 @@ export async function runWithAutoRetry(config: AutoRetryConfig): Promise<AutoRet
 
     previousSignature = signature;
     previousMismatches = mismatches;
+    // Pin the FIRST round's exam for every later round (computed once).
+    if (attempt === 0 && config.pinWorkflows !== undefined) {
+      pinned = config.pinWorkflows(rounds[0]!.sessionId);
+    }
   }
   // Unreachable (the loop always returns on the last attempt).
   throw new Error("auto-retry loop exited without a verdict");
