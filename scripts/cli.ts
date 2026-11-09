@@ -33,8 +33,10 @@ import {
 } from "../src/config/pipeline.js";
 import { runStageFlow, type StageFlowResult, type WorkflowsStage } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
+import { existingBranchPrepareStage } from "../src/runtime/stage-presets.js";
 import { loadReusableWorkflowsStage, runStageFlowResume } from "../src/runtime/stage-resume.js";
-import { runWithAutoRetry } from "../src/runtime/auto-retry.js";
+import { continuedRefactorStage } from "../src/runtime/feedback/repair.js";
+import { runFeedbackLoop } from "../src/runtime/feedback/coordinator.js";
 
 installOwnedProcessSignalHandlers();
 
@@ -177,22 +179,41 @@ async function executeRun(
       limitOverrides: overrides,
     });
   } else if (command.autoRetry > 0) {
-    const outcome = await runWithAutoRetry({
+    // The feedback loop: on failure, route the evidence back to the ORIGINAL
+    // refactor dialogue (continued conversation), rebuild from the measured
+    // candidate branch, and re-verify — budget-capped, exam pinned.
+    const feedbackOutcome = await runFeedbackLoop({
       baseTask: command.task,
-      maxRetries: command.autoRetry,
-      runRound: (round, task, sid, pinned) => runOnce(round, task, sid, pinned),
-      makeSessionId: (round) => (round === 1 ? sessionId : `${sessionId}-r${round}`),
-      pinWorkflows: (firstRoundSessionId) =>
-        loadReusableWorkflowsStage(repo, sessionRoot, firstRoundSessionId),
+      budget: command.autoRetry,
       // Progress notices go to stderr: stdout stays machine-readable under --format json.
       notify: (message) => console.error(message),
+      runInitial: () => runOnce(1, command.task, sessionId),
+      loadPinnedWorkflows: () => loadReusableWorkflowsStage(repo, sessionRoot, sessionId),
+      runRepairRound: (round, context) =>
+        runStageFlow({
+          repoPath: repo,
+          task: command.task,
+          sessionRoot,
+          sessionId: `${sessionId}-fb${String(round)}`,
+          ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
+          ...(command.injections.length > 0 ? { injections: command.injections } : {}),
+          limitOverrides: overrides,
+          flow: {
+            ...(context.pinnedWorkflows !== null ? { workflows: context.pinnedWorkflows } : {}),
+            prepare: existingBranchPrepareStage({
+              branch: context.candidateBranch,
+              baseSha: context.baseSha,
+            }),
+            refactor: continuedRefactorStage({ dialogueId: context.dialogueId, feedback: context.feedback }),
+          },
+        }),
     });
-    result = outcome.result;
-    if (outcome.rounds.length > 1) {
+    result = feedbackOutcome.result;
+    if (feedbackOutcome.rounds.length > 1) {
       autoRetryMeta = {
-        rounds: outcome.rounds.length,
-        stoppedBecause: outcome.stoppedBecause,
-        lastSession: outcome.rounds.at(-1)!.sessionId,
+        rounds: feedbackOutcome.rounds.length,
+        stoppedBecause: feedbackOutcome.stoppedBecause,
+        lastSession: feedbackOutcome.rounds.at(-1)!.sessionId,
       };
     }
   } else {

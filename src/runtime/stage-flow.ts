@@ -193,6 +193,13 @@ export interface StageFlowResult {
   readonly store: SessionStore;
   readonly state: string;
   readonly refactorSummary: string;
+  /** SDK conversation id of the refactor dialogue (null when the flow never
+   *  reached a refactor session or the session reported none). The feedback
+   *  loop continues this conversation on repair rounds. */
+  readonly refactorDialogueId: string | null;
+  /** Host-measured candidate facts (null before the refactor commit). Repair
+   *  rounds rebuild from this branch and base. */
+  readonly patch: PatchFacts | null;
   readonly declared: DeclaredAgentResolution | null;
   readonly verification: WorkflowVerificationOutcome | null;
   readonly provenance: StageProvenance;
@@ -238,6 +245,10 @@ export interface CandidateWorkspace {
 
 export interface RefactorOutcome {
   readonly summary: string;
+  /** SDK conversation id of the refactor dialogue; the feedback loop
+   *  continues THIS conversation on repair rounds instead of paying for a
+   *  fresh session to re-read the whole project. */
+  readonly dialogueId?: string;
 }
 
 /** Host-measured candidate facts handed to the verification stage. */
@@ -349,6 +360,8 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   let declared: DeclaredAgentResolution | null = null;
   let verification: WorkflowVerificationOutcome | null = null;
   let refactorSummary = "";
+  let refactorDialogueId: string | null = null;
+  let measuredPatch: PatchFacts | null = null;
   let worktrees: WorktreePair | null = null;
   // The catch-all attributes a thrown error to the stage in progress; halts
   // carry their own stage at the call site.
@@ -356,7 +369,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   // Stage-completion facts for resume; rewritten after each completed stage.
   const checkpoints: StageCheckpoint[] = [];
   const done = (): StageFlowResult =>
-    result(store, logger, declared, verification, refactorSummary, provenance);
+    result(store, logger, declared, verification, refactorSummary, refactorDialogueId, measuredPatch, provenance);
 
   try {
     const originalRepository = new TrackedRepositoryGuard(req.repoPath);
@@ -425,6 +438,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
       return done();
     }
     refactorSummary = refactored.summary;
+    if (refactored.dialogueId !== undefined) refactorDialogueId = refactored.dialogueId;
     logger.artifact("refactor-summary.json", { summary: refactored.summary });
     logger.info("refactor stage completed", { stage_source: flow.refactor === undefined ? "agent" : "injected" });
 
@@ -448,9 +462,11 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
       changed_files: changedFiles,
       summary: summaryLine.slice(0, 500),
     };
+    measuredPatch = patch;
     logger.artifact("patch-candidate.json", patch);
     // Refactor checkpoint: written only after the host measured the commit,
-    // so a resume never replays an unmeasured half-state.
+    // so a resume never replays an unmeasured half-state. The dialogue id
+    // rides along so a feedback round can continue the SAME conversation.
     checkpoints.push({
       stage: "refactor",
       at: now(),
@@ -459,6 +475,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
         base_sha: patch.base_sha,
         commit_sha: patch.commit_sha,
         summary: patch.summary,
+        ...(refactorDialogueId !== null ? { dialogue_id: refactorDialogueId } : {}),
       },
     });
     saveStageCheckpoints(store, checkpoints);
@@ -651,7 +668,10 @@ export const defaultRefactorStage: RefactorStage = async (ctx, input) => {
     }),
   );
   ctx.logger.info("Claude refactor agent completed", {});
-  return { summary: refactor.summary };
+  return {
+    summary: refactor.summary,
+    ...(refactor.dialogueId !== undefined ? { dialogueId: refactor.dialogueId } : {}),
+  };
 };
 
 /** Host default: differential build + test execution and the verdict. */
@@ -817,6 +837,8 @@ function result(
   declared: DeclaredAgentResolution | null,
   verification: WorkflowVerificationOutcome | null,
   refactorSummary: string,
+  refactorDialogueId: string | null,
+  measuredPatch: PatchFacts | null,
   provenance: StageProvenance,
 ): StageFlowResult {
   // Read the attribution back from the store instead of threading it through
@@ -827,6 +849,8 @@ function result(
     store,
     state: store.state,
     refactorSummary,
+    refactorDialogueId,
+    patch: measuredPatch,
     declared,
     verification,
     provenance,
