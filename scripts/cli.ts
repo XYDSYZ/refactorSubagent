@@ -31,12 +31,18 @@ import {
   extractPipelineArgs,
   resolvePipeline,
 } from "../src/config/pipeline.js";
-import { runStageFlow, type StageFlowResult, type WorkflowsStage } from "../src/runtime/stage-flow.js";
+import { runStageFlow, verifyStageWithReuse, continuedWorkflowsStage, type StageFlowResult, type WorkflowsStage } from "../src/runtime/stage-flow.js";
+import { halt } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
-import { existingBranchPrepareStage } from "../src/runtime/stage-presets.js";
-import { loadReusableWorkflowsStage, runStageFlowResume } from "../src/runtime/stage-resume.js";
-import { continuedRefactorStage } from "../src/runtime/feedback/repair.js";
+import { existingBranchPrepareStage, fixedRefactorStage, presetWorkflowsStage } from "../src/runtime/stage-presets.js";
+import { loadReusableWorkflowsStage, loadWorkflowsCheckpointView, runStageFlowResume } from "../src/runtime/stage-resume.js";
+import {
+  composeBuildRepairBrief,
+  continuedRefactorStage,
+  runBuildWriterRepairSession,
+} from "../src/runtime/feedback/repair.js";
 import { runFeedbackLoop } from "../src/runtime/feedback/coordinator.js";
+import { readFileSync } from "node:fs";
 
 installOwnedProcessSignalHandlers();
 
@@ -179,18 +185,76 @@ async function executeRun(
       limitOverrides: overrides,
     });
   } else if (command.autoRetry > 0) {
-    // The feedback loop: on failure, route the evidence back to the ORIGINAL
-    // refactor dialogue (continued conversation), rebuild from the measured
-    // candidate branch, and re-verify — budget-capped, exam pinned.
+    // The feedback loop: route each failure to the lane that owns it —
+    // refactor dialogue continuation, exam-script continuation, or a repair
+    // build-writer — then re-execute only what the repair touched.
+    const e2eDirOf = (sid: string) => join(sessionRoot, ".refactor", "e2e", sid);
+    const readArtifact = (sid: string, name: string): unknown => {
+      try {
+        return JSON.parse(readFileSync(join(e2eDirOf(sid), "artifacts", name), "utf8"));
+      } catch {
+        return null;
+      }
+    };
     const feedbackOutcome = await runFeedbackLoop({
       baseTask: command.task,
       budget: command.autoRetry,
       // Progress notices go to stderr: stdout stays machine-readable under --format json.
       notify: (message) => console.error(message),
+      stateDir: join(sessionRoot, ".refactor", "feedback", sessionId),
       runInitial: () => runOnce(1, command.task, sessionId),
       loadPinnedWorkflows: () => loadReusableWorkflowsStage(repo, sessionRoot, sessionId),
-      runRepairRound: (round, context) =>
-        runStageFlow({
+      locateExamEntry: () => {
+        const view = loadWorkflowsCheckpointView(repo, sessionRoot, sessionId);
+        if (view === null) return null;
+        return view.entryRoot !== null ? join(view.entryRoot, view.testEntry) : join(repo, view.testEntry);
+      },
+      composeBuildBrief: (evidence, round) => {
+        const view = loadWorkflowsCheckpointView(repo, sessionRoot, sessionId);
+        if (view === null || view.builds.length === 0) return null;
+        const failed = view.builds[0]!;
+        const entryRoot = view.entryRoot ?? repo;
+        const entryAbs = join(entryRoot, failed.entry);
+        let source: string | undefined;
+        try {
+          source = readFileSync(entryAbs, "utf8");
+        } catch {
+          source = undefined;
+        }
+        return composeBuildRepairBrief(evidence, {
+          round,
+          failedBuildId: failed.id,
+          failedBuildEntry: entryAbs,
+          failedBuildSource: source,
+          otherSideOutcome:
+            evidence.side === "candidate"
+              ? "基线侧使用同一方案构建成功。"
+              : "构建在基线侧失败，候选侧尚未执行。",
+        });
+      },
+      runBuildRepair: async (brief, round) => {
+        const host = readArtifact(sessionId, "host-preflight.json") as never;
+        const project = readArtifact(sessionId, "project-detection.json") as never;
+        if (host === null || project === null) return null;
+        return runBuildWriterRepairSession({
+          repoDir: repo,
+          sessionRoot,
+          sessionId: `${sessionId}-fb${String(round)}-bw`,
+          task: command.task,
+          host,
+          project,
+          brief,
+        });
+      },
+      loadBaselineObservations: (previousSessionId) => {
+        const artifact = readArtifact(previousSessionId, "expectation-baseline.json") as
+          | { expectations?: unknown }
+          | null;
+        if (artifact === null || !Array.isArray(artifact.expectations)) return null;
+        return artifact.expectations as never;
+      },
+      runRepairRound: (round, context) => {
+        const base = {
           repoPath: repo,
           task: command.task,
           sessionRoot,
@@ -198,15 +262,84 @@ async function executeRun(
           ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
           ...(command.injections.length > 0 ? { injections: command.injections } : {}),
           limitOverrides: overrides,
+        };
+        if (context.lane === "refactor") {
+          return runStageFlow({
+            ...base,
+            flow: {
+              workflows: context.pinnedWorkflows,
+              prepare: existingBranchPrepareStage({
+                branch: context.candidateBranch,
+                baseSha: context.baseSha,
+              }),
+              refactor: continuedRefactorStage({
+                dialogueId: context.dialogueId,
+                feedback: context.feedback,
+              }),
+              verify: verifyStageWithReuse(
+                context.reusedBaseline !== null
+                  ? { reusedBaseline: { expectations: context.reusedBaseline } }
+                  : {},
+              ),
+            },
+          });
+        }
+        if (context.lane === "test") {
+          return runStageFlow({
+            ...base,
+            flow: {
+              workflows: continuedWorkflowsStage({
+                dialogueId: context.dialogueId,
+                feedback: context.feedback,
+                testEntry: context.testEntry,
+              }),
+              prepare: existingBranchPrepareStage({
+                branch: context.candidateBranch,
+                baseSha: context.baseSha,
+              }),
+              refactor: fixedRefactorStage(
+                `feedback: candidate branch ${context.candidateBranch} carries the measured change`,
+              ),
+            },
+          });
+        }
+        // build lane: the pinned exam entry composed with the FIXED build.
+        const view = loadWorkflowsCheckpointView(repo, sessionRoot, sessionId);
+        if (view === null) {
+          // The coordinator guaranteed the pin earlier; a vanished checkpoint
+          // here fails the round loudly via a halting workflows stage.
+          return runStageFlow({
+            ...base,
+            flow: {
+              workflows: async () =>
+                halt("feedback build lane: round-1 checkpoint vanished mid-round", {
+                  category: "resolution",
+                  component: "feedback-build-lane",
+                  retryable: false,
+                }),
+            },
+          });
+        }
+        return runStageFlow({
+          ...base,
           flow: {
-            ...(context.pinnedWorkflows !== null ? { workflows: context.pinnedWorkflows } : {}),
+            workflows: presetWorkflowsStage({
+              builds: [{ id: context.fixedBuild.id, entry: context.fixedBuild.entry, runLocal: true }],
+              testEntry: view.entryRoot !== null ? join(view.entryRoot, view.testEntry) : view.testEntry,
+              workflowId: view.workflowId,
+              revision: view.workflowRevision,
+              ...(view.entryRoot !== null ? { entryRoot: view.entryRoot } : {}),
+            }),
             prepare: existingBranchPrepareStage({
               branch: context.candidateBranch,
               baseSha: context.baseSha,
             }),
-            refactor: continuedRefactorStage({ dialogueId: context.dialogueId, feedback: context.feedback }),
+            refactor: fixedRefactorStage(
+              `feedback: candidate branch ${context.candidateBranch} carries the measured change`,
+            ),
           },
-        }),
+        });
+      },
     });
     result = feedbackOutcome.result;
     if (feedbackOutcome.rounds.length > 1) {

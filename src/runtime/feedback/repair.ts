@@ -1,5 +1,10 @@
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { runAgent } from "../../agents/driver.js";
 import { REFACTOR_AGENT_TOOLS } from "../../agents/refactor.js";
+import { LocalDependencyRegistry } from "../../agents/dep-registry.js";
+import { createDependencyMcpServer } from "../../agents/dep-registry-server.js";
+import { VerificationAnalysisStore } from "../../agents/verification-analysis.js";
 import type { RefactorStage } from "../stage-flow.js";
 import { halt } from "../stage-flow.js";
 import type { RefactorTrigger, RepairEvidence } from "./types.js";
@@ -113,4 +118,132 @@ export function continuedRefactorStage(spec: {
       ...(run.sessionId !== undefined ? { dialogueId: run.sessionId } : {}),
     };
   };
+}
+
+/**
+ * Feedback for the CONTINUED authoring dialogue when the exam itself errored
+ * as a script (JS/machinery failure — never a behavior verdict). The exam
+ * reshapes ONLY for its own bugs; behavior mismatches never reach this lane.
+ */
+export function composeTestScriptFeedback(
+  evidence: RepairEvidence,
+  context: { round: number; testEntry: string },
+): string {
+  const lines: string[] = [];
+  lines.push(`[第 ${String(context.round)} 轮反馈 — 系统自动追加]`);
+  lines.push("你编写的 TestWorkflow 在执行时自身出错了（脚本错误，不是被测程序的行为问题）。");
+  lines.push(`错误证据：${evidence.summary}`);
+  if (evidence.side !== undefined) {
+    lines.push(`出错的一侧：${evidence.side === "baseline" ? "基线（原代码）" : "候选（新代码）"}。`);
+  }
+  if (evidence.evidencePaths !== undefined && evidence.evidencePaths.length > 0) {
+    lines.push(`日志与证据路径（可读取）：${evidence.evidencePaths.join("、")}`);
+  }
+  lines.push("请修复脚本的执行错误（路径、API 用法、语法等），并保持考卷的覆盖面不缩水。");
+  return lines.join("\n");
+}
+
+/**
+ * Repair brief for a dedicated build-writer session (baseline-build lane).
+ * Evidence-first: the session reads the provided failure facts instead of
+ * re-investigating the whole project; the host executes the fixed workflow.
+ */
+export function composeBuildRepairBrief(evidence: RepairEvidence, context: {
+  round: number;
+  failedBuildId: string;
+  failedBuildEntry: string;
+  failedBuildSource?: string;
+  expectedArtifacts?: readonly string[];
+  otherSideOutcome?: string;
+}): string {
+  const lines: string[] = [];
+  lines.push(`[第 ${String(context.round)} 轮构建方案修复任务]`);
+  lines.push("一个已交付的 BuildWorkflow 执行失败了。请阅读并修复这个方案，保留其中有效的部分，不要重新调查整个项目。");
+  lines.push(`失败发生在：${evidence.side === "candidate" ? "候选侧（新代码）" : "基线侧（原代码）"}。`);
+  lines.push(`方案编号：${context.failedBuildId}`);
+  lines.push(`方案源文件：${context.failedBuildEntry}`);
+  if (context.failedBuildSource !== undefined) {
+    lines.push("---- 方案当前内容 ----");
+    lines.push(context.failedBuildSource);
+    lines.push("---- 内容结束 ----");
+  }
+  lines.push(`失败原因：${evidence.summary}`);
+  if (context.expectedArtifacts !== undefined && context.expectedArtifacts.length > 0) {
+    lines.push(`预期产物（测试脚本依赖它们，请保持路径与接口不变）：${context.expectedArtifacts.join("、")}`);
+  }
+  if (context.otherSideOutcome !== undefined) {
+    lines.push(`另一侧的执行结果：${context.otherSideOutcome}`);
+  }
+  if (evidence.evidencePaths !== undefined && evidence.evidencePaths.length > 0) {
+    lines.push(`完整日志（可读取）：${evidence.evidencePaths.join("、")}`);
+  }
+  lines.push("要求：");
+  lines.push("1. 依据上面的错误证据定位问题；确需改变产物路径或接口时，说明变化及受影响的测试。");
+  lines.push("2. 通过 generateBuildWorkflow 工具提交修复后的完整方案（运行内新修订，不覆盖库里的共享方案）。");
+  lines.push("3. 如确认是缺工具、权限等环境问题导致无法修复，直接报告原因与证据，不要硬修。");
+  return lines.join("\n");
+}
+
+/**
+ * Run the dedicated build-repair session. The session explores with the same
+ * tool arrangement as the authoring build-writer and registers the fixed
+ * workflow through the host's MCP registration tool. Returns the registered
+ * run-local build ({id, entry}) or null when the session produced nothing.
+ */
+export async function runBuildWriterRepairSession(options: {
+  readonly repoDir: string;
+  readonly sessionRoot: string;
+  readonly sessionId: string;
+  readonly task: string;
+  readonly host: unknown;
+  readonly project: unknown;
+  readonly brief: string;
+  readonly logger?: Parameters<typeof runAgent>[0]["logger"];
+  readonly limits?: { maxTurns?: number | null; model?: string | null; deadlineMs?: number | null; stallMs?: number | null };
+}): Promise<{ id: string; entry: string } | null> {
+  const buildDir = join(options.repoDir, ".refactor", "runs", options.sessionId, "workflows", "build");
+  const registry = new LocalDependencyRegistry({
+    workspaceRoot: options.repoDir,
+    sessionRoot: options.sessionRoot,
+    sessionId: options.sessionId,
+    host: options.host as never,
+    project: options.project as never,
+  });
+  const verificationAnalysis = new VerificationAnalysisStore(
+    join(options.repoDir, ".refactor", "runs", options.sessionId, "workflows", "verification-analysis.json"),
+    options.task,
+  );
+  const mcpServer = createDependencyMcpServer({ registry, verificationAnalysis });
+  let run: Awaited<ReturnType<typeof runAgent>>;
+  try {
+    run = await runAgent({
+      cwd: options.repoDir,
+      prompt: options.brief,
+      allowedTools: ["Read", "Glob", "Grep", "Bash"],
+      extraAllowedTools: [
+        "mcp__dep-registry__inspectWorkflow",
+        "mcp__dep-registry__generateBuildWorkflow",
+      ],
+      mcpServers: { "dep-registry": mcpServer as never },
+      // A fresh registry session: the repair registers a NEW run-local revision
+      // under this repair session id; shared library workflows stay untouched.
+      maxTurns: options.limits?.maxTurns ?? undefined,
+      model: options.limits?.model ?? null,
+      timeoutMs: options.limits?.deadlineMs ?? undefined,
+      stallTimeoutMs: options.limits?.stallMs ?? null,
+      logger: options.logger,
+    });
+  } finally {
+    verificationAnalysis.close();
+  }
+  if (run.isError || run.resumeMismatch === true) return null;
+  if (!existsSync(buildDir)) return null;
+  const entries = readdirSync(buildDir)
+    .filter((file) => file.endsWith(".ts"))
+    .map((file) => ({ id: file.slice(0, -3), entry: join(buildDir, file) }))
+    .sort((a, b) => a.entry.localeCompare(b.entry));
+  if (entries.length === 0) return null;
+  // Deterministic pick when several revisions exist: the lexicographically
+  // last entry (generateBuildWorkflow appends revisions).
+  return entries.at(-1)!;
 }

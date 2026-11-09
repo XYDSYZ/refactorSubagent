@@ -76,7 +76,7 @@ export interface RunCommand {
   /**
    * After a REJECTED verdict, re-run up to N more times; each retry is a fresh
    * session whose task carries the previous round's behavior-diff lessons.
-   * Program-orchestrated, hard-capped; 0 disables (default).
+   * Program-orchestrated, hard-capped; 0 disables (default 3).
    */
   autoRetry: number;
   format: CliFormat;
@@ -157,7 +157,7 @@ function parseRun(args: string[]): RunCommand {
   let worktreeRoot: string | null = null;
   const injections: { source: string; dest: string }[] = [];
   let resume: string | null = null;
-  let autoRetry = 0;
+  let autoRetry = 3;
   let format: CliFormat = "human";
   let sawRepo = false;
   for (let index = 0; index < args.length; index++) {
@@ -402,7 +402,8 @@ Auto-retry (after a REJECTED verdict):
                               comparable. Stops on ACCEPTED, on two identical
                               consecutive failure signatures, on ABORTED, and
                               on non-authoritative verification; every stop
-                              prints a plain-language report. 0 disables.
+                              prints a plain-language report. 0 disables;
+                              the default is 3.
 
 Stage sources (accepted by "run"), later wins:
   --pipeline-file <path>      Extra pipeline layer, merged in order (repeatable)

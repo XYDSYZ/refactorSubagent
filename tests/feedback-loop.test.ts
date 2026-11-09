@@ -1,8 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import { parseCliArgs } from "../src/cli/args.js";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import {
+  runStageFlow,
+  verifyStageWithReuse,
+  type StageFlowResult,
+} from "../src/runtime/stage-flow.js";
+import {
+  existingBranchPrepareStage,
+  presetWorkflowsStage,
+} from "../src/runtime/stage-presets.js";
+import { loadReusableWorkflowsStage } from "../src/runtime/stage-resume.js";
 import { composeRefactorFeedback } from "../src/runtime/feedback/repair.js";
 import { runFeedbackLoop, routerInputOf, type FeedbackLoopConfig, type RepairRoundContext } from "../src/runtime/feedback/coordinator.js";
-import type { StageFlowResult } from "../src/runtime/stage-flow.js";
 
 /**
  * Feedback-loop tests: pure orchestration over scripted round results and a
@@ -13,6 +26,7 @@ import type { StageFlowResult } from "../src/runtime/stage-flow.js";
 function fakeResult(options: {
   state: string;
   dialogueId?: string | null;
+  workflowsDialogue?: string | null;
   branch?: string;
   commitSha?: string;
   failure?: { category: string; component: string; reason: string } | null;
@@ -22,6 +36,7 @@ function fakeResult(options: {
     state: options.state,
     refactorSummary: "fake",
     refactorDialogueId: options.dialogueId ?? null,
+    workflowsDialogueId: options.workflowsDialogue ?? null,
     patch: options.branch !== undefined
       ? {
           branch: options.branch,
@@ -89,6 +104,7 @@ function makeConfig(
   budget = 3,
 ): FeedbackLoopConfig {
   let call = 0;
+  const fakeStage = (async () => ({})) as never;
   return {
     baseTask: "重构任务",
     budget,
@@ -99,10 +115,11 @@ function makeConfig(
       call++;
       return step;
     },
-    loadPinnedWorkflows: () => {
-      captured.pinnedCalls += 1;
-      return (async () => ({})) as never;
-    },
+    loadPinnedWorkflows: () => fakeStage,
+    locateExamEntry: () => "D:\\fake\\exam\\test-workflow.ts",
+    composeBuildBrief: () => "构建修复简报",
+    runBuildRepair: async () => ({ id: "fixed-build", entry: "D:\\fake\\fixed-build.ts" }),
+    loadBaselineObservations: () => null,
     runRepairRound: async (round, context) => {
       captured.rounds.push(`repair-${String(round)}`);
       captured.repairContexts.push(context);
@@ -181,10 +198,10 @@ describe("runFeedbackLoop", () => {
     expect(captured.rounds).toEqual(["initial", "repair-2"]);
     // The repair round continued the SAME dialogue with the diff embedded.
     const context = captured.repairContexts[0]!;
+    if (context.lane !== "refactor") throw new Error("expected refactor lane");
     expect(context.dialogueId).toBe("conv-1");
     expect(context.candidateBranch).toBe("refactor/agent-x");
     expect(context.feedback).toContain("csv[0].mean.stdout");
-    expect(context.pinnedWorkflows).not.toBeNull();
   });
 
   test("budget exhaustion keeps the last real result", async () => {
@@ -245,20 +262,70 @@ describe("runFeedbackLoop", () => {
     expect(captured.repairContexts).toHaveLength(0);
   });
 
-  test("baseline build failure routes to the (unwired) build repair and stops honestly", async () => {
+  test("baseline build failure goes through the build-repair lane", async () => {
     const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
     const outcome = await runFeedbackLoop(
       makeConfig([
         fakeResult({
           state: "ABORTED",
-          branch: "b",
+          dialogueId: "conv-1",
+          branch: "refactor/agent-x",
+          commitSha: "c1",
           failure: { category: "build", component: "build-workflow:baseline", reason: "gcc exited 1" },
         }),
+        fakeResult({ state: "ACCEPTED", dialogueId: "conv-1", branch: "refactor/agent-x", commitSha: "c1" }),
       ], captured),
     );
-    expect(outcome.stoppedBecause).toBe("unwired-repair");
+    expect(outcome.stoppedBecause).toBe("accepted");
+    expect(captured.rounds).toEqual(["initial", "repair-2"]);
+    const context = captured.repairContexts[0]!;
+    if (context.lane !== "build") throw new Error("expected build lane");
+    expect(context.fixedBuild.id).toBe("fixed-build");
+    // The candidate branch is preserved untouched by the build repair.
+    expect(context.candidateBranch).toBe("refactor/agent-x");
+    expect(captured.notifications.join("\n")).toContain("构建修理工");
+  });
+
+  test("build repair that delivers nothing stops and keeps the evidence", async () => {
+    const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+    const config = makeConfig([
+      fakeResult({
+        state: "ABORTED",
+        branch: "refactor/agent-x",
+        failure: { category: "build", component: "build-workflow:baseline", reason: "gcc exited 1" },
+      }),
+    ], captured);
+    const outcome = await runFeedbackLoop({ ...config, runBuildRepair: async () => null });
+    expect(outcome.stoppedBecause).toBe("repair-failed");
     expect(captured.repairContexts).toHaveLength(0);
-    expect(captured.notifications.join("\n")).toContain("尚未接线");
+    expect(captured.notifications.join("\n")).toContain("没有交付可用的修复方案");
+  });
+
+  test("test-script failure continues the authoring dialogue (test lane)", async () => {
+    const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+    const outcome = await runFeedbackLoop(
+      makeConfig([
+        fakeResult({
+          state: "ABORTED",
+          workflowsDialogue: "conv-author",
+          dialogueId: "conv-refactor",
+          branch: "refactor/agent-x",
+          commitSha: "c1",
+          failure: {
+            category: "test",
+            component: "test-workflow:baseline",
+            reason: "TypeError: ctx.fs.read is not a function",
+          },
+        }),
+        fakeResult({ state: "ACCEPTED", branch: "refactor/agent-x" }),
+      ], captured),
+    );
+    expect(outcome.stoppedBecause).toBe("accepted");
+    const context = captured.repairContexts[0]!;
+    if (context.lane !== "test") throw new Error("expected test lane");
+    expect(context.dialogueId).toBe("conv-author");
+    expect(context.testEntry).toContain("test-workflow.ts");
+    expect(context.feedback).toContain("脚本错误");
   });
 
   test("environment failure routes to an immediate stop", async () => {
@@ -286,13 +353,153 @@ describe("runFeedbackLoop", () => {
 });
 
 describe("--auto-retry parsing (carried over from the auto-retry suite)", () => {
-  test("defaults to 0 (disabled) and accepts an explicit 0", () => {
+  test("defaults to 3 (feedback on) and accepts an explicit 0", () => {
     const defaults = parseCliArgs(["run", ".", "--task", "t"]);
-    expect(defaults.kind === "run" && defaults.autoRetry).toBe(0);
+    expect(defaults.kind === "run" && defaults.autoRetry).toBe(3);
     const explicitZero = parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "0"]);
     expect(explicitZero.kind === "run" && explicitZero.autoRetry).toBe(0);
-    const three = parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "3"]);
-    expect(three.kind === "run" && three.autoRetry).toBe(3);
+    const one = parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "1"]);
+    expect(one.kind === "run" && one.autoRetry).toBe(1);
     expect(() => parseCliArgs(["run", ".", "--task", "t", "--auto-retry", "-1"])).toThrow(/non-negative/);
   });
 });
+
+describe("feedback integration (real gcc, real git)", () => {
+  const BUILD_WORKFLOW = `
+export const workflowKind = "workflow-driven";
+
+export default async ({ process, fs, validator }) => {
+  await fs.mkdir("build");
+  const compiled = await process.run({
+    program: "gcc",
+    args: ["main.c", "-o", "build/app.exe"],
+    cwd: ".",
+    timeoutMs: 60000,
+  });
+  if (compiled.status !== "exited" || compiled.exitCode !== 0) {
+    throw new Error("gcc failed");
+  }
+  await validator.assertFile("build/app.exe", "fixture executable");
+};
+`;
+
+  const TEST_WORKFLOW = `
+export const workflowKind = "test-workflow-driven";
+
+export default async (ctx) => {
+  await ctx.validator.assertFile("build/app.exe", "fixture executable");
+  const run = await ctx.process.run({ program: "build/app.exe", args: [], cwd: ".", timeoutMs: 30000 });
+  ctx.expect("exit-code", run.exitCode);
+  ctx.expect("stdout", run.stdout.trim());
+};
+`;
+
+  const MAIN_V1 = [
+    "#include <stdio.h>",
+    "",
+    "int main(void) {",
+    '  puts("hello v1");',
+    "  return 0;",
+    "}",
+    "",
+  ].join("\n");
+
+  const MAIN_V2 = MAIN_V1.replace("hello v1", "hello v2");
+  const MAIN_FIXED = MAIN_V1.replace("int main(void) {", "int main(void) { /* fixed */");
+
+  function gitIn(dir: string, args: string[]): string {
+    return execFileSync("git", args, { cwd: dir, encoding: "utf8" }).trim();
+  }
+
+  function createRepo(): { repo: string; sessionRoot: string } {
+    const root = mkdtempSync(join(tmpdir(), "rfr-feedback-int-"));
+    const repo = join(root, "repo");
+    const sessionRoot = join(root, "session-root");
+    mkdirSync(join(repo, "workflows"), { recursive: true });
+    mkdirSync(sessionRoot, { recursive: true });
+    writeFileSync(join(repo, ".gitattributes"), "* -text\n");
+    writeFileSync(join(repo, "main.c"), MAIN_V1);
+    writeFileSync(join(repo, "workflows", "build.ts"), BUILD_WORKFLOW);
+    writeFileSync(join(repo, "workflows", "test.ts"), TEST_WORKFLOW);
+    gitIn(repo, ["init", "-q"]);
+    gitIn(repo, ["config", "user.email", "t@example.com"]);
+    gitIn(repo, ["config", "user.name", "Test"]);
+    gitIn(repo, ["add", "-A"]);
+    gitIn(repo, ["commit", "-qm", "base"]);
+    return { repo, sessionRoot };
+  }
+
+  test("a REJECTED round's baseline observations are reused by the repair round", async () => {
+    const fixture = createRepo();
+    try {
+      // Round 1: the candidate branch carries a behavior-breaking change.
+      const baseSha = gitIn(fixture.repo, ["rev-parse", "HEAD"]);
+      writeFileSync(join(fixture.repo, "main.c"), MAIN_V2);
+      gitIn(fixture.repo, ["add", "-A"]);
+      gitIn(fixture.repo, ["commit", "-qm", "behavior-breaking change"]);
+      gitIn(fixture.repo, ["branch", "fb-int-1-branch"]);
+      gitIn(fixture.repo, ["checkout", "-q", "HEAD~1"]);
+
+      const round1 = await runStageFlow({
+        repoPath: fixture.repo,
+        task: "integration: rejected round",
+        sessionRoot: fixture.sessionRoot,
+        sessionId: "fb-int-1",
+        flow: {
+          workflows: presetWorkflowsStage({
+            builds: [{ id: "gcc-app", entry: "workflows/build.ts" }],
+            testEntry: "workflows/test.ts",
+          }),
+          prepare: existingBranchPrepareStage({ branch: "fb-int-1-branch", baseSha }),
+          refactor: async () => ({ summary: "behavior-breaking change already on the branch" }),
+        },
+      });
+      expect(round1.state).toBe("REJECTED");
+      expect(round1.patch).not.toBeNull();
+      expect(round1.patch!.branch).toBe("fb-int-1-branch");
+
+      // Repair round: the continued dialogue's fix (simulated — a
+      // behavior-restoring edit) re-verifies with the baseline REUSED.
+      const pinned = loadReusableWorkflowsStage(fixture.repo, fixture.sessionRoot, "fb-int-1");
+      expect(pinned).not.toBeNull();
+      const reusedExpectations = (JSON.parse(
+        readFileSync(join(round1.logDir, "artifacts", "expectation-baseline.json"), "utf8"),
+      ) as { expectations: unknown }).expectations;
+      expect(Array.isArray(reusedExpectations)).toBe(true);
+
+      const round2 = await runStageFlow({
+        repoPath: fixture.repo,
+        task: "integration: repair round",
+        sessionRoot: fixture.sessionRoot,
+        sessionId: "fb-int-2",
+        flow: {
+          workflows: pinned!,
+          prepare: existingBranchPrepareStage({
+            branch: round1.patch!.branch,
+            baseSha: round1.patch!.base_sha,
+          }),
+          refactor: async (_ctx, input) => {
+            // The continued dialogue's output: restore the original behavior,
+            // keep only a comment-level difference from the base.
+            writeFileSync(join(input.candidate.worktrees.candidateDir, "main.c"), MAIN_FIXED);
+            return { summary: "fixed: behavior restored, comment-only difference" };
+          },
+          verify: verifyStageWithReuse({ reusedBaseline: { expectations: reusedExpectations as never } }),
+        },
+      });
+      expect(round2.state).toBe("ACCEPTED");
+
+      // The reuse actually happened (not a silent full re-run).
+      const runLog = readFileSync(join(round2.logDir, "run.jsonl"), "utf8");
+      expect(runLog).toContain("baseline observations reused");
+      // And the reused baseline is identical to round 1's measurement.
+      const reusedArtifact = JSON.parse(
+        readFileSync(join(round2.logDir, "artifacts", "expectation-baseline.json"), "utf8"),
+      ) as { expectations: unknown };
+      expect(JSON.stringify(reusedArtifact.expectations)).toBe(JSON.stringify(reusedExpectations));
+    } finally {
+      rmSync(join(fixture.repo, ".."), { recursive: true, force: true });
+    }
+  }, 180_000);
+});
+

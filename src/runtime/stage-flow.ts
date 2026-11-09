@@ -27,7 +27,11 @@ import { StageFailureError } from "./stage-failure.js";
 import { FileSessionStore } from "./session-store.js";
 import { detectCProject } from "./project-detector.js";
 import { probeHost } from "./host-preflight.js";
-import { runWorkflowVerification, type WorkflowVerificationOutcome } from "./workflow-pipeline.js";
+import {
+  runWorkflowVerification,
+  type WorkflowVerificationOutcome,
+  type WorkflowVerificationRequest,
+} from "./workflow-pipeline.js";
 import { applyInjections, type InjectionSpec } from "./inject.js";
 import { TrackedRepositoryGuard, type IntegrityInput } from "./verification-integrity.js";
 import {
@@ -197,6 +201,10 @@ export interface StageFlowResult {
    *  reached a refactor session or the session reported none). The feedback
    *  loop continues this conversation on repair rounds. */
   readonly refactorDialogueId: string | null;
+  /** SDK conversation id of the test-writer dialogue (null when the flow never
+   *  reached an authoring session or it reported none). The feedback loop
+   *  continues this conversation on exam-repair rounds. */
+  readonly workflowsDialogueId: string | null;
   /** Host-measured candidate facts (null before the refactor commit). Repair
    *  rounds rebuild from this branch and base. */
   readonly patch: PatchFacts | null;
@@ -234,6 +242,9 @@ export interface WorkflowsOutcome {
   /** Root the declared entries were resolved against and must stay inside.
    *  Defaults to the repository when the stage does not say otherwise. */
   readonly entryRoot?: string;
+  /** SDK conversation id of the authoring dialogue; the feedback loop
+   *  continues THIS conversation when the exam needs a script repair. */
+  readonly dialogueId?: string;
 }
 
 /** Branch + worktree pair the refactor stage edits and verification measures. */
@@ -361,6 +372,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   let verification: WorkflowVerificationOutcome | null = null;
   let refactorSummary = "";
   let refactorDialogueId: string | null = null;
+  let workflowsDialogueId: string | null = null;
   let measuredPatch: PatchFacts | null = null;
   let worktrees: WorktreePair | null = null;
   // The catch-all attributes a thrown error to the stage in progress; halts
@@ -369,7 +381,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   // Stage-completion facts for resume; rewritten after each completed stage.
   const checkpoints: StageCheckpoint[] = [];
   const done = (): StageFlowResult =>
-    result(store, logger, declared, verification, refactorSummary, refactorDialogueId, measuredPatch, provenance);
+    result(store, logger, declared, verification, refactorSummary, refactorDialogueId, workflowsDialogueId, measuredPatch, provenance);
 
   try {
     const originalRepository = new TrackedRepositoryGuard(req.repoPath);
@@ -412,6 +424,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
       return done();
     }
     declared = workflows.declared;
+    if (workflows.dialogueId !== undefined) workflowsDialogueId = workflows.dialogueId;
     checkpoints.push({ stage: "workflows", at: now(), data: workflowsCheckpointData(req.repoPath, workflows) });
     saveStageCheckpoints(store, checkpoints);
 
@@ -601,8 +614,9 @@ export const defaultWorkflowsStage: WorkflowsStage = async (ctx, input) => {
   ctx.logger.startHeartbeat(5_000);
   const sessionStarted = performance.now();
   let declared: DeclaredAgentResolution;
+  let testWriterDialogueId: string | undefined;
   try {
-    declared = await runDeclaredResolution({
+    const authored = await runDeclaredResolution({
       repoDir: ctx.repoPath,
       sessionRoot: ctx.store.sessionDir,
       sessionId: ctx.sessionId,
@@ -614,6 +628,8 @@ export const defaultWorkflowsStage: WorkflowsStage = async (ctx, input) => {
       limits: ctx.limits.sessions.testWriter,
       policyRepairs: ctx.limits.stages.policyRepairs,
     });
+    declared = authored.resolution;
+    testWriterDialogueId = authored.dialogueId;
   } finally {
     ctx.logger.stopHeartbeat();
   }
@@ -629,8 +645,57 @@ export const defaultWorkflowsStage: WorkflowsStage = async (ctx, input) => {
     test_entry: declared.testResolution.entry,
     test_id: declared.workflowId,
   });
-  return { declared };
+  return {
+    declared,
+    ...(testWriterDialogueId !== undefined ? { dialogueId: testWriterDialogueId } : {}),
+  };
 };
+
+/**
+ * A workflows stage that CONTINUES the round-1 authoring conversation with
+ * failure feedback (exam script-repair lane). Deliverable gates inside the
+ * session machinery apply unchanged; the exam is re-authored at the SAME
+ * round-1 path so both sides of the repair round run one identical new exam.
+ */
+export function continuedWorkflowsStage(spec: {
+  readonly dialogueId: string;
+  readonly feedback: string;
+  readonly testEntry: string;
+}): WorkflowsStage {
+  return async (ctx, input) => {
+    ctx.logger.info("continuing test-writer dialogue with failure feedback");
+    ctx.logger.startHeartbeat(5_000);
+    let declared: DeclaredAgentResolution;
+    let dialogueId: string | undefined;
+    try {
+      const authored = await runDeclaredResolution({
+        repoDir: ctx.repoPath,
+        sessionRoot: ctx.store.sessionDir,
+        sessionId: ctx.sessionId,
+        task: ctx.task,
+        host: input.preflight.host,
+        project: input.preflight.project,
+        logger: ctx.logger,
+        sessionStore: ctx.sessionStore,
+        limits: ctx.limits.sessions.testWriter,
+        policyRepairs: ctx.limits.stages.policyRepairs,
+        testEntryOverride: spec.testEntry,
+        resume: { dialogueId: spec.dialogueId, feedback: spec.feedback },
+      });
+      declared = authored.resolution;
+      dialogueId = authored.dialogueId;
+    } finally {
+      ctx.logger.stopHeartbeat();
+    }
+    ctx.logger.artifact("declared-build-set.json", declared.declaredSet);
+    ctx.logger.artifact("workflow-resolution-test.json", declared.testResolution);
+    ctx.logger.artifact("test-workflow.json", { kind: "test-workflow-source", source: declared.testSource });
+    return {
+      declared,
+      ...(dialogueId !== undefined ? { dialogueId } : {}),
+    };
+  };
+}
 
 /** Host default: create the candidate branch and both worktrees. */
 export const defaultPrepareStage: PrepareStage = async (ctx) => {
@@ -676,9 +741,35 @@ export const defaultRefactorStage: RefactorStage = async (ctx, input) => {
 
 /** Host default: differential build + test execution and the verdict. */
 export const defaultVerifyStage: VerifyStage = async (ctx, input) => {
+  return runWorkflowVerification(verifyRequestOf(ctx, input));
+};
+
+/**
+ * A verify stage variant for feedback repair rounds: identical to the
+ * default, plus optional baseline-observation reuse. The caller is
+ * responsible for the reuse guards (the coordinator checks them); the
+ * pipeline itself re-validates and re-submits every artifact either way.
+ */
+export function verifyStageWithReuse(options: {
+  reusedBaseline?: {
+    readonly expectations: readonly import("./workflow-pipeline.js").ReusedExpectation[];
+  };
+}): VerifyStage {
+  return async (ctx, input) => {
+    const request = verifyRequestOf(ctx, input);
+    return runWorkflowVerification({
+      ...request,
+      ...(options.reusedBaseline !== undefined
+        ? { reusedBaseline: options.reusedBaseline }
+        : {}),
+    });
+  };
+}
+
+function verifyRequestOf(ctx: StageContext, input: VerifyStageInput): WorkflowVerificationRequest {
   const { declared } = input.workflows;
   const firstBuild = declared.buildResolutions[0]!;
-  return runWorkflowVerification({
+  return {
     repoPath: ctx.repoPath,
     worktrees: input.candidate.worktrees,
     store: ctx.store,
@@ -722,8 +813,8 @@ export const defaultVerifyStage: VerifyStage = async (ctx, input) => {
     ...(ctx.knownEnvironmentPatterns !== undefined
       ? { knownEnvironmentPatterns: ctx.knownEnvironmentPatterns }
       : {}),
-  });
-};
+  };
+}
 
 /**
  * The reason recorded for the ABORTED transition. The orchestrator stores it in
@@ -838,6 +929,7 @@ function result(
   verification: WorkflowVerificationOutcome | null,
   refactorSummary: string,
   refactorDialogueId: string | null,
+  workflowsDialogueId: string | null,
   measuredPatch: PatchFacts | null,
   provenance: StageProvenance,
 ): StageFlowResult {
@@ -850,6 +942,7 @@ function result(
     state: store.state,
     refactorSummary,
     refactorDialogueId,
+    workflowsDialogueId,
     patch: measuredPatch,
     declared,
     verification,
@@ -945,6 +1038,11 @@ function workflowsCheckpointData(
   return {
     entry_root: entryRoot.split("\\").join("/"),
     test_entry: relative(entryRoot, declared.testResolution.entry).split("\\").join("/"),
+    // The exam source hash is the reuse guard: a repair round may reuse the
+    // baseline observations only while this hash (plus the builds' hashes and
+    // the repo HEAD) is unchanged.
+    test_source_hash: declared.testResolution.sourceHash,
+    ...(outcome.dialogueId !== undefined ? { dialogue_id: outcome.dialogueId } : {}),
     workflow_id: declared.workflowId,
     workflow_revision: declared.workflowRevision,
     builds: declared.declaredSet.builds.map((b) => ({
@@ -1013,9 +1111,17 @@ async function runDeclaredResolution(options: {
   readonly limits: SessionLimits;
   /** Rewrite sessions allowed per rejected workflow source. */
   readonly policyRepairs: number;
-}): Promise<DeclaredAgentResolution> {
+  /** Absolute TestWorkflow entry override (feedback repair rounds keep the
+   *  round-1 exam path; default = this session's own run dir). */
+  readonly testEntryOverride?: string;
+  /** Continue a prior authoring conversation (exam script repair lane). */
+  readonly resume?: {
+    readonly dialogueId: string;
+    readonly feedback: string;
+  };
+}): Promise<{ resolution: DeclaredAgentResolution; dialogueId?: string }> {
   const testRelDir = join(".refactor", "runs", options.sessionId, "workflows", "test");
-  const testEntry = join(options.repoDir, testRelDir, "test-workflow.ts");
+  const testEntry = options.testEntryOverride ?? join(options.repoDir, testRelDir, "test-workflow.ts");
   const session = await runWorkflowSession({
     repoDir: options.repoDir,
     sessionRoot: options.sessionRoot,
@@ -1027,6 +1133,7 @@ async function runDeclaredResolution(options: {
     logger: options.logger,
     sessionStore: options.sessionStore,
     limits: options.limits,
+    ...(options.resume !== undefined ? { resume: options.resume } : {}),
   });
   if (!session.ok) {
     const f = asWorkflowSessionFailure(session.failure);
@@ -1111,7 +1218,7 @@ async function runDeclaredResolution(options: {
     });
   }
 
-  return buildDeclaredResolution({
+  const resolution = buildDeclaredResolution({
     repoDir: options.repoDir,
     testEntry,
     workflowId: `test-${options.sessionId}`,
@@ -1119,6 +1226,10 @@ async function runDeclaredResolution(options: {
     builds: buildSources,
     resolved,
   });
+  return {
+    resolution,
+    ...(session.dialogueId !== undefined ? { dialogueId: session.dialogueId } : {}),
+  };
 }
 
 /**

@@ -137,6 +137,54 @@ const RefactorCheckpointData = z.object({
   summary: z.string(),
 });
 
+/** Parsed view of a session's workflows checkpoint (paths relative to entryRoot). */
+export interface WorkflowsCheckpointView {
+  readonly testEntry: string;
+  readonly entryRoot: string | null;
+  readonly workflowId: string;
+  readonly workflowRevision: number;
+  readonly builds: readonly {
+    readonly id: string;
+    readonly entry: string;
+    readonly sourceHash: string;
+    readonly runLocal: boolean;
+  }[];
+}
+
+/** Read a session's workflows checkpoint as data (no stage built). Null when
+ *  missing or malformed — callers stop honestly instead of guessing. */
+export function loadWorkflowsCheckpointView(
+  repoPath: string,
+  sessionRoot: string,
+  sourceSessionId: string,
+): WorkflowsCheckpointView | null {
+  let checkpoints: readonly StageCheckpoint[];
+  try {
+    const store = SessionStore.open(sessionRoot, sourceSessionId);
+    const loaded = loadStageCheckpoints(store.sessionDir);
+    if (loaded.error !== null) return null;
+    checkpoints = loaded.checkpoints;
+  } catch {
+    return null;
+  }
+  const entry = checkpointOf(checkpoints, "workflows");
+  if (entry === null) return null;
+  const parsed = WorkflowsCheckpointData.safeParse(entry.data);
+  if (!parsed.success) return null;
+  return {
+    testEntry: parsed.data.test_entry,
+    entryRoot: parsed.data.entry_root ?? null,
+    workflowId: parsed.data.workflow_id,
+    workflowRevision: parsed.data.workflow_revision,
+    builds: parsed.data.builds.map((build) => ({
+      id: build.id,
+      entry: build.entry,
+      sourceHash: build.source_hash,
+      runLocal: build.run_local,
+    })),
+  };
+}
+
 /**
  * Rebuild the PINNED workflows stage from a session's workflows checkpoint —
  * the same exam the source run used. Auto-retry needs this: every retry round
