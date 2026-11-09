@@ -31,9 +31,10 @@ import {
   extractPipelineArgs,
   resolvePipeline,
 } from "../src/config/pipeline.js";
-import { runStageFlow } from "../src/runtime/stage-flow.js";
+import { runStageFlow, type StageFlowResult } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
 import { runStageFlowResume } from "../src/runtime/stage-resume.js";
+import { runWithAutoRetry } from "../src/runtime/auto-retry.js";
 
 installOwnedProcessSignalHandlers();
 
@@ -137,28 +138,49 @@ async function executeRun(
   // the pipeline config / --stage selected, and injections are forwarded so
   // the resumed run verifies the same environment as the failed one.
   const resumeFrom = command.resume;
-  const result = resumeFrom !== null
-    ? await runStageFlowResume({
-        repoPath: repo,
-        task: command.task,
-        sessionRoot,
-        sessionId,
-        sourceSessionId: resumeFrom,
-        ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
-        ...(command.injections.length > 0 ? { injections: command.injections } : {}),
-        baseFlow: flow,
-        limitOverrides: overrides,
-      })
-    : await runStageFlow({
-        repoPath: repo,
-        task: command.task,
-        sessionRoot,
-        sessionId,
-        ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
-        ...(command.injections.length > 0 ? { injections: command.injections } : {}),
-        limitOverrides: overrides,
-        flow,
-      });
+  const runOnce = (round: number, task: string, sid: string): Promise<StageFlowResult> =>
+    runStageFlow({
+      repoPath: repo,
+      task,
+      sessionRoot,
+      sessionId: sid,
+      ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
+      ...(command.injections.length > 0 ? { injections: command.injections } : {}),
+      limitOverrides: overrides,
+      flow,
+    });
+  let result: StageFlowResult;
+  let autoRetryMeta: { rounds: number; stoppedBecause: string } | null = null;
+  if (resumeFrom !== null) {
+    if (command.autoRetry > 0) {
+      console.log("--auto-retry applies to fresh runs only; this resume executes once.");
+    }
+    result = await runStageFlowResume({
+      repoPath: repo,
+      task: command.task,
+      sessionRoot,
+      sessionId,
+      sourceSessionId: resumeFrom,
+      ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
+      ...(command.injections.length > 0 ? { injections: command.injections } : {}),
+      baseFlow: flow,
+      limitOverrides: overrides,
+    });
+  } else if (command.autoRetry > 0) {
+    const outcome = await runWithAutoRetry({
+      baseTask: command.task,
+      maxRetries: command.autoRetry,
+      runRound: (round, task) => runOnce(round, task, round === 1 ? sessionId : `${sessionId}-r${round}`),
+      makeSessionId: (round) => (round === 1 ? sessionId : `${sessionId}-r${round}`),
+      notify: (message) => console.log(message),
+    });
+    result = outcome.result;
+    if (outcome.rounds.length > 1) {
+      autoRetryMeta = { rounds: outcome.rounds.length, stoppedBecause: outcome.stoppedBecause };
+    }
+  } else {
+    result = await runOnce(1, command.task, sessionId);
+  }
   const declaredBuilds = result.declared?.declaredSet.builds.map((build) => build.id) ?? [];
   const summary = {
     state: result.state,
@@ -170,6 +192,7 @@ async function executeRun(
     injected_stages: result.provenance.injected,
     verification_authoritative: result.provenance.verification_authoritative,
     ...(result.provenance.resume !== undefined ? { resumed_from: result.provenance.resume } : {}),
+    ...(autoRetryMeta !== null ? { auto_retry: autoRetryMeta } : {}),
     declared_builds: declaredBuilds,
     baseline_build: result.verification?.baselineBuild?.status ?? null,
     candidate_build: result.verification?.candidateBuild?.status ?? null,
@@ -199,6 +222,11 @@ async function executeRun(
     if (result.provenance.resume !== undefined) {
       console.log(
         `resumed from: ${result.provenance.resume.source_session} (reused: ${result.provenance.resume.reused_stages.join(", ") || "none"})`,
+      );
+    }
+    if (autoRetryMeta !== null) {
+      console.log(
+        `auto retry: ${autoRetryMeta.rounds} rounds (${autoRetryMeta.stoppedBecause}); see each round's log dir above for verdicts`,
       );
     }
     if (result.provenance.injected.length > 0) {

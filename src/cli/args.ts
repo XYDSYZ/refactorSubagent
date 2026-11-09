@@ -73,6 +73,12 @@ export interface RunCommand {
   injections: readonly InjectionSpec[];
   /** Aborted session id to resume from its stage checkpoints (null = fresh run). */
   resume: string | null;
+  /**
+   * After a REJECTED verdict, re-run up to N more times; each retry is a fresh
+   * session whose task carries the previous round's behavior-diff lessons.
+   * Program-orchestrated, hard-capped; 0 disables (default).
+   */
+  autoRetry: number;
   format: CliFormat;
 }
 
@@ -151,6 +157,7 @@ function parseRun(args: string[]): RunCommand {
   let worktreeRoot: string | null = null;
   const injections: { source: string; dest: string }[] = [];
   let resume: string | null = null;
+  let autoRetry = 0;
   let format: CliFormat = "human";
   let sawRepo = false;
   for (let index = 0; index < args.length; index++) {
@@ -184,6 +191,10 @@ function parseRun(args: string[]): RunCommand {
       resume = nextValue(args, ++index, "--resume");
       continue;
     }
+    if (arg === "--auto-retry") {
+      autoRetry = parsePositiveInteger(nextValue(args, ++index, "--auto-retry"), "--auto-retry");
+      continue;
+    }
     if (arg === "--format") {
       format = parseFormat(nextValue(args, ++index, "--format"));
       continue;
@@ -194,7 +205,7 @@ function parseRun(args: string[]): RunCommand {
     sawRepo = true;
   }
   if (task === null) throw new CliUsageError("run requires --task <text>");
-  return { kind: "run", repo, task, session, sessionRoot, worktreeRoot, injections, resume, format };
+  return { kind: "run", repo, task, session, sessionRoot, worktreeRoot, injections, resume, autoRetry, format };
 }
 
 function parsePreflight(args: string[]): PreflightCommand {
@@ -352,7 +363,7 @@ export const CLI_HELP = `Usage:
   refactor-subagent preflight [repo] [--format human|json]
   refactor-subagent run [repo] --task <text> [--session <id>] [--session-root <dir>]
                             [--worktree-root <dir>] [--inject <src>=<dest>]
-                            [--resume <aborted-session-id>]
+                            [--resume <aborted-session-id>] [--auto-retry <max>]
   refactor-subagent workflow run <entry.ts> [options]
   refactor-subagent workflow build <entry.ts> --id <id> --revision <n> [options]
   refactor-subagent workflow list [--cwd <dir>] [--format human|json]
