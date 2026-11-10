@@ -140,7 +140,7 @@ export async function runAgent(o: DriverOptions): Promise<DriverRun> {
       // Without forkSession the SDK continues the SAME id, so a mismatching
       // session_id in the result exposes a silent fallback to a new chat.
       ...(o.resumeSessionId !== undefined ? { resume: o.resumeSessionId } : {}),
-      systemPrompt: o.systemPrompt,
+      ...(o.systemPrompt !== undefined ? { systemPrompt: o.systemPrompt } : {}),
       ...(o.maxTurns !== undefined && o.maxTurns !== null ? { maxTurns: o.maxTurns } : {}),
       ...(o.model !== undefined && o.model !== null ? { model: o.model } : {}),
       abortController,

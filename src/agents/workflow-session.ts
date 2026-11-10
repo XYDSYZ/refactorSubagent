@@ -68,7 +68,9 @@ export interface WorkflowSessionOptions {
 export interface WorkflowSessionAgentOptions {
   readonly cwd: string;
   readonly prompt: string;
-  readonly systemPrompt: string;
+  /** Authoring system prompt. Absent on resume (the stored conversation
+   *  carries its own; combining both is an untested SDK path). */
+  readonly systemPrompt?: string;
   readonly allowedTools: readonly string[];
   readonly extraAllowedTools: readonly string[];
   readonly agents: Record<string, unknown>;
@@ -266,7 +268,10 @@ export async function runWorkflowSession(
     run = await runner({
       cwd: repoDir,
       prompt,
-      systemPrompt: TEST_WORKFLOW_SYSTEM,
+      // On resume the stored conversation carries its original system prompt;
+      // a fresh one alongside resume is an untested SDK combination, so the
+      // continuation keeps the session's own prompt.
+      ...(options.resume === undefined ? { systemPrompt: TEST_WORKFLOW_SYSTEM } : {}),
       allowedTools: [...TEST_WRITER_AGENT_TOOLS],
       extraAllowedTools: mcpTools,
       agents,
