@@ -276,6 +276,7 @@ async function executeRun(
               refactor: continuedRefactorStage({
                 dialogueId: context.dialogueId,
                 feedback: context.feedback,
+                dialogueRoot: e2eDirOf(sessionId),
               }),
               verify: verifyStageWithReuse(
                 context.reusedBaseline !== null
@@ -293,6 +294,7 @@ async function executeRun(
                 dialogueId: context.dialogueId,
                 feedback: context.feedback,
                 testEntry: context.testEntry,
+                dialogueRoot: e2eDirOf(sessionId),
               }),
               prepare: existingBranchPrepareStage({
                 branch: context.candidateBranch,
