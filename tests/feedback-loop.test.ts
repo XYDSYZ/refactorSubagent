@@ -120,6 +120,7 @@ function makeConfig(
     composeBuildBrief: () => "构建修复简报",
     runBuildRepair: async () => ({ id: "fixed-build", entry: "D:\\fake\\fixed-build.ts" }),
     loadBaselineObservations: () => null,
+    sessionIdFor: (round) => `real-session-${round === 1 ? "base" : `fb${String(round)}`}`,
     runRepairRound: async (round, context) => {
       captured.rounds.push(`repair-${String(round)}`);
       captured.repairContexts.push(context);
@@ -260,6 +261,31 @@ describe("runFeedbackLoop", () => {
     );
     expect(outcome.stoppedBecause).toBe("missing-dialogue");
     expect(captured.repairContexts).toHaveLength(0);
+  });
+
+  test("baseline reuse receives the PREVIOUS round's real session id", async () => {
+    const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+    const observedSessionIds: string[] = [];
+    const config = makeConfig([
+      fakeResult({ state: "REJECTED", dialogueId: "conv-1", branch: "b", commitSha: "c1", mismatches: MISMATCHES }),
+      fakeResult({ state: "ACCEPTED", branch: "b" }),
+    ], captured);
+    const outcome = await runFeedbackLoop({
+      ...config,
+      loadBaselineObservations: (previousSessionId) => {
+        observedSessionIds.push(previousSessionId);
+        return [{ name: "e1", relation: "equal", value: 1 }] as never;
+      },
+    });
+    expect(outcome.stoppedBecause).toBe("accepted");
+    // The loader must be called with the REAL round-1 session id — the
+    // internal "round-1" label names no on-disk directory (regression: reuse
+    // silently never activated in production because of exactly that).
+    expect(observedSessionIds).toEqual(["real-session-base"]);
+    const context = captured.repairContexts[0]!;
+    if (context.lane !== "refactor") throw new Error("expected refactor lane");
+    expect(context.reusedBaseline).not.toBeNull();
+    expect(context.sessionId).toBe("real-session-fb2");
   });
 
   test("baseline build failure goes through the build-repair lane", async () => {

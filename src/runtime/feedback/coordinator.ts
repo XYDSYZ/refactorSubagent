@@ -1,3 +1,4 @@
+import { join } from "node:path";
 import type { StageFlowResult, WorkflowsStage } from "../stage-flow.js";
 import type { ReusedExpectation } from "../workflow-pipeline.js";
 import { classifyFailureOwner, routeFailure, type RouterInput } from "./router.js";
@@ -52,6 +53,13 @@ export interface FeedbackLoopConfig {
   readonly stateDir?: string;
   /** Run one repair round with the composed lane context. */
   readonly runRepairRound: (round: number, context: RepairRoundContext) => Promise<StageFlowResult>;
+  /**
+   * REAL session id for a round number (the CLI owns id layout: base id for
+   * round 1, `<base>-fb<N>` for repairs). Records, reuse loaders and the
+   * durable state must use these ids — internal "round-N" labels do not name
+   * any on-disk directory.
+   */
+  readonly sessionIdFor: (round: number) => string;
 }
 
 export type RepairRoundContext =
@@ -143,8 +151,8 @@ export function routerInputOf(result: StageFlowResult): RouterInput {
     mismatches,
     failureOwner: failure === null ? null : classifyFailureOwner(failure.reason),
     evidencePaths: [
-      `${result.logDir}\\artifacts\\expectation-comparison-result.json`,
-      `${result.logDir}\\artifacts\\patch-candidate.json`,
+      join(result.logDir, "artifacts", "expectation-comparison-result.json"),
+      join(result.logDir, "artifacts", "patch-candidate.json"),
     ],
   };
 }
@@ -192,7 +200,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
   // ---- Round 1: the initial execution (not budgeted) ----
   config.notify("第 1 轮执行开始：完整流水线（出卷、施工、验证）。");
   let result = await config.runInitial();
-  let record = evaluate(1, "round-1", result);
+  let record = evaluate(1, config.sessionIdFor(1), result);
   rounds.push(record);
   persist(record, result);
 
@@ -237,7 +245,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
     }
 
     const round = rounds.length + 1;
-    const sessionId = `round-${String(round)}`;
+    const sessionId = config.sessionIdFor(round);
     let context: RepairRoundContext | { error: "missing-dialogue" | "missing-patch" | "missing-input" | "repair-failed"; detail: string };
 
     if (decision.kind === "repair-refactor") {
@@ -260,6 +268,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       // behavior mismatch) implies the baseline side PASSED under this exact
       // pinned exam in the previous round, and repair rounds never move the
       // repo HEAD — so the previous baseline observations remain valid.
+      // The loader receives the previous round's REAL session id.
       const reusedBaseline = config.loadBaselineObservations(rounds.at(-1)!.sessionId);
       const feedback = composeRefactorFeedback(decision.trigger, decision.evidence, {
         candidateBranch: patch.branch,

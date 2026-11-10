@@ -202,6 +202,7 @@ async function executeRun(
       // Progress notices go to stderr: stdout stays machine-readable under --format json.
       notify: (message) => console.error(message),
       stateDir: join(sessionRoot, ".refactor", "feedback", sessionId),
+      sessionIdFor: (round) => (round === 1 ? sessionId : `${sessionId}-fb${String(round)}`),
       runInitial: () => runOnce(1, command.task, sessionId),
       loadPinnedWorkflows: () => loadReusableWorkflowsStage(repo, sessionRoot, sessionId),
       locateExamEntry: () => {
