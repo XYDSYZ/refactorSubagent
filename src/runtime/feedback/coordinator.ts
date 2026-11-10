@@ -178,12 +178,26 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
     : null;
   if (persisted !== null && persisted.budgetTotal !== config.budget) persisted = null;
   let budgetUsed = persisted?.budgetUsed ?? 0;
-  const persist = (round: FeedbackRoundOutcome, result: StageFlowResult): void => {
+  const persist = (record: FeedbackRoundOutcome, result: StageFlowResult): void => {
     if (config.stateDir === undefined) return;
     const base = persisted ?? freshFeedbackState(config.budget);
     base.budgetUsed = budgetUsed;
     if (result.refactorDialogueId !== null) base.dialogues.refactor = result.refactorDialogueId;
     if (result.workflowsDialogueId !== null) base.dialogues.testWriter = result.workflowsDialogueId;
+    // The audit trail: append the round (history is never rewritten).
+    base.rounds = [
+      ...base.rounds,
+      {
+        round: record.round,
+        sessionId: record.sessionId,
+        outcome: record.state === "ACCEPTED" || record.state === "REJECTED" ? record.state : "ABORTED",
+        decision: record.decision,
+        repair: null,
+        budgeted: record.round > 1,
+        artifactHash: record.artifactHash,
+        failureSignature: record.failureSignature,
+      },
+    ];
     persisted = base;
     saveFeedbackState(config.stateDir, base);
   };

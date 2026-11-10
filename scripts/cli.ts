@@ -237,6 +237,9 @@ async function executeRun(
         const host = readArtifact(sessionId, "host-preflight.json") as never;
         const project = readArtifact(sessionId, "project-detection.json") as never;
         if (host === null || project === null) return null;
+        // Bound the repair session with the authoring budget: without an
+        // overall deadline only the stall watchdog would limit it.
+        const repairLimits = resolveLimits({ repoRoot: repo, overrides }).limits.sessions.testWriter;
         return runBuildWriterRepairSession({
           repoDir: repo,
           sessionRoot,
@@ -245,6 +248,12 @@ async function executeRun(
           host,
           project,
           brief,
+          limits: {
+            maxTurns: repairLimits.maxTurns,
+            model: repairLimits.model,
+            deadlineMs: repairLimits.deadlineMs,
+            stallMs: repairLimits.stallMs,
+          },
         });
       },
       loadBaselineObservations: (previousSessionId) => {

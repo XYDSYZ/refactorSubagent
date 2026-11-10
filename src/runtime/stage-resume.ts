@@ -118,6 +118,10 @@ export interface RefactorCheckpoint {
 const WorkflowsCheckpointData = z.object({
   entry_root: z.string().min(1).optional(),
   test_entry: z.string().min(1),
+  /** Exam source hash — the reuse guard record (baseline-observation reuse). */
+  test_source_hash: z.string().optional(),
+  /** Authoring dialogue id — the exam-repair lane's continuation handle. */
+  dialogue_id: z.string().optional(),
   workflow_id: z.string().min(1),
   workflow_revision: z.number().int().positive(),
   builds: z.array(

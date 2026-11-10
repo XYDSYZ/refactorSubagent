@@ -113,15 +113,18 @@ export type RepairOutcome =
 export interface FeedbackRoundRecord {
   /** 1-based round number; round 1 is the initial execution (not budgeted). */
   readonly round: number;
-  /** Orchestrator session id that owns this round's verdict. */
+  /** REAL session id that owned this round's verdict. */
   readonly sessionId: string;
   readonly outcome: "ACCEPTED" | "REJECTED" | "ABORTED";
   /** Decision the router made (null when the round succeeded). */
   readonly decision: FeedbackDecision["kind"] | null;
-  /** Repair kind that was attempted (null when none). */
-  readonly repair: RepairOutcome["kind"] | null;
+  /** Repair lane attempted this round (null for the initial round). */
+  readonly repair: string | null;
   /** Whether this round consumed one feedback budget unit. */
   readonly budgeted: boolean;
+  /** Identity of what the round produced (no-progress audit). */
+  readonly artifactHash: string | null;
+  readonly failureSignature: string | null;
 }
 
 /** Dialogue handles the loop keeps alive across rounds. */
@@ -146,5 +149,5 @@ export interface FeedbackState {
   /** Attempts already consumed (success or failure both count). */
   budgetUsed: number;
   readonly dialogues: DialogueHandles;
-  readonly rounds: FeedbackRoundRecord[];
+  rounds: FeedbackRoundRecord[];
 }

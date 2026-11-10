@@ -198,6 +198,8 @@ describe("feedback state sidecar", () => {
         decision: "repair-refactor",
         repair: null,
         budgeted: false,
+        artifactHash: "commit-1",
+        failureSignature: "repair-refactor:csv[0].mean.stdout",
       });
       state = consumeBudget(state)!;
       saveFeedbackState(dir, state);
