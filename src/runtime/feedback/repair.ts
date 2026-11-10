@@ -5,6 +5,7 @@ import { REFACTOR_AGENT_TOOLS } from "../../agents/refactor.js";
 import { LocalDependencyRegistry } from "../../agents/dep-registry.js";
 import { createDependencyMcpServer } from "../../agents/dep-registry-server.js";
 import { VerificationAnalysisStore } from "../../agents/verification-analysis.js";
+import { FileSessionStore } from "../session-store.js";
 import type { RefactorStage } from "../stage-flow.js";
 import { halt } from "../stage-flow.js";
 import type { RefactorTrigger, RepairEvidence } from "./types.js";
@@ -74,23 +75,24 @@ export function composeRefactorFeedback(
 export function continuedRefactorStage(spec: {
   readonly dialogueId: string;
   readonly feedback: string;
-  readonly maxTurns?: number | null;
-  readonly model?: string | null;
-  readonly timeoutMs?: number;
-  readonly stallTimeoutMs?: number | null;
+  /** Round 1's e2e dir — the resume must read the conversation from the
+   *  store it was PERSISTED to (this round's own store would not find it). */
+  readonly dialogueRoot: string;
 }): RefactorStage {
-  return async (_ctx, input) => {
+  return async (ctx, input) => {
+    const limits = ctx.limits.sessions.refactor;
     const run = await runAgent({
       cwd: input.candidate.worktrees.candidateDir,
       prompt: spec.feedback,
       allowedTools: [...REFACTOR_AGENT_TOOLS],
+      // Resume reads the stored conversation from ROUND 1's store root; the
+      // continuation appends to the same durable transcript.
+      sessionStore: new FileSessionStore(spec.dialogueRoot),
       resumeSessionId: spec.dialogueId,
-      ...(spec.maxTurns !== undefined && spec.maxTurns !== null ? { maxTurns: spec.maxTurns } : {}),
-      ...(spec.model !== undefined && spec.model !== null ? { model: spec.model } : {}),
-      ...(spec.timeoutMs !== undefined ? { timeoutMs: spec.timeoutMs } : {}),
-      ...(spec.stallTimeoutMs !== undefined && spec.stallTimeoutMs !== null
-        ? { stallTimeoutMs: spec.stallTimeoutMs }
-        : {}),
+      maxTurns: limits.maxTurns,
+      model: limits.model,
+      timeoutMs: limits.deadlineMs ?? undefined,
+      stallTimeoutMs: limits.stallMs,
     });
     if (run.resumeMismatch === true) {
       // A fresh chat answered — that is NOT a continuation. Fail loudly: the

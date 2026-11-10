@@ -69,6 +69,10 @@ export function classifyFailureOwner(reason: string): FailureOwner {
     "did not run or read any implementation artifact",
   ];
   // Script-shaped failures: JS/machinery errors inside the workflow itself.
+  // The zod issue codes cover declaration-validation failures the host emits
+  // when a workflow produced malformed expectations — definitionally a
+  // script error (observed live: an exam passed observed values into the
+  // relation slot and the parse rejected hundreds of declarations).
   const scriptMarkers = [
     "typeerror",
     "referenceerror",
@@ -77,6 +81,8 @@ export function classifyFailureOwner(reason: string): FailureOwner {
     "is not a function",
     "undefined is not",
     "enoent", // script read a path that does not exist
+    "invalid_enum_value", // zod: a declaration field got a wrong-typed value
+    "invalid_type", // zod: same, different code
   ];
   const program = programMarkers.some((marker) => text.includes(marker));
   const script = scriptMarkers.some((marker) => text.includes(marker));

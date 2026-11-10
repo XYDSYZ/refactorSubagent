@@ -82,6 +82,17 @@ describe("classifyFailureOwner / isEnvironmentFailure", () => {
     expect(classifyFailureOwner("process exited with code 1")).toBe("ambiguous");
   });
 
+  test("zod declaration-validation failures classify as script errors (live finding)", () => {
+    // Observed live: an exam passed observed values into the relation slot;
+    // the host's ExpectationBaseline parse rejected the declarations with a
+    // zod issue dump. That is definitionally the exam's own bug.
+    const zodDump = `[{"code":"invalid_enum_value","path":["expectations",12,"relation"],` +
+      `"message":"Invalid enum value. Expected 'equal', received '0.000\\n'"}]`;
+    expect(classifyFailureOwner(zodDump)).toBe("script");
+    const zodType = `[{"code":"invalid_type","path":["expectations",13,"relation"]}]`;
+    expect(classifyFailureOwner(zodType)).toBe("script");
+  });
+
   test("environment markers stop before wasting a repair", () => {
     expect(isEnvironmentFailure("gcc: command not found")).toBe(true);
     expect(isEnvironmentFailure("Access is denied for build/x.exe")).toBe(true);

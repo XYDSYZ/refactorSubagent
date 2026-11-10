@@ -661,6 +661,9 @@ export function continuedWorkflowsStage(spec: {
   readonly dialogueId: string;
   readonly feedback: string;
   readonly testEntry: string;
+  /** Round 1's e2e dir — the resume reads the authoring conversation from
+   *  the store it was persisted to. */
+  readonly dialogueRoot: string;
 }): WorkflowsStage {
   return async (ctx, input) => {
     ctx.logger.info("continuing test-writer dialogue with failure feedback");
@@ -681,6 +684,7 @@ export function continuedWorkflowsStage(spec: {
         policyRepairs: ctx.limits.stages.policyRepairs,
         testEntryOverride: spec.testEntry,
         resume: { dialogueId: spec.dialogueId, feedback: spec.feedback },
+        resumeStoreRoot: spec.dialogueRoot,
       });
       declared = authored.resolution;
       dialogueId = authored.dialogueId;
@@ -1119,6 +1123,10 @@ async function runDeclaredResolution(options: {
     readonly dialogueId: string;
     readonly feedback: string;
   };
+  /** Session-store override for resume: the continuation must read the
+   *  conversation from the store root it was persisted to (round 1's e2e
+   *  dir), not this round's own store. */
+  readonly resumeStoreRoot?: string;
 }): Promise<{ resolution: DeclaredAgentResolution; dialogueId?: string }> {
   const testRelDir = join(".refactor", "runs", options.sessionId, "workflows", "test");
   const testEntry = options.testEntryOverride ?? join(options.repoDir, testRelDir, "test-workflow.ts");
@@ -1131,7 +1139,9 @@ async function runDeclaredResolution(options: {
     host: options.host,
     project: options.project,
     logger: options.logger,
-    sessionStore: options.sessionStore,
+    sessionStore: options.resumeStoreRoot !== undefined
+      ? new FileSessionStore(options.resumeStoreRoot)
+      : options.sessionStore,
     limits: options.limits,
     ...(options.resume !== undefined ? { resume: options.resume } : {}),
   });
