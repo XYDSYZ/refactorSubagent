@@ -39,6 +39,7 @@ import { loadReusableWorkflowsStage, loadWorkflowsCheckpointView, runStageFlowRe
 import {
   composeBuildRepairBrief,
   continuedRefactorStage,
+  mergeRepairedBuilds,
   runBuildWriterRepairSession,
 } from "../src/runtime/feedback/repair.js";
 import { runFeedbackLoop } from "../src/runtime/feedback/coordinator.js";
@@ -213,7 +214,16 @@ async function executeRun(
       composeBuildBrief: (evidence, round) => {
         const view = loadWorkflowsCheckpointView(repo, sessionRoot, sessionId);
         if (view === null || view.builds.length === 0) return null;
-        const failed = view.builds[0]!;
+        // Locate the failed build honestly: by attributed id when the
+        // round-1 evidence carries one, otherwise only when a single build
+        // makes the target unambiguous. Multi-build sets without an id
+        // must not be briefed against a guessed build.
+        const failed = evidence.buildId === undefined
+          ? view.builds.length === 1
+            ? view.builds[0]!
+            : null
+          : view.builds.find((build) => build.id === evidence.buildId) ?? null;
+        if (failed === null) return null;
         const entryRoot = view.entryRoot ?? repo;
         const entryAbs = join(entryRoot, failed.entry);
         let source: string | undefined;
@@ -332,11 +342,32 @@ async function executeRun(
             },
           });
         }
+        // The repaired build replaces its declared slot; every other
+        // declared build keeps running (a shrunken set would verify a
+        // different contract than round 1 did). An unmappable repair
+        // halts loudly instead of guessing.
+        const builds = mergeRepairedBuilds(view.builds, context.fixedBuild, context.failedBuildId);
+        if (builds === null) {
+          return runStageFlow({
+            ...base,
+            flow: {
+              workflows: async () =>
+                halt(
+                  `feedback build lane: repaired build ${context.fixedBuild.id} does not map into the round-1 build set (${view.builds.map((build) => build.id).join(", ")})`,
+                  {
+                    category: "resolution",
+                    component: "feedback-build-lane",
+                    retryable: false,
+                  },
+                ),
+            },
+          });
+        }
         return runStageFlow({
           ...base,
           flow: {
             workflows: presetWorkflowsStage({
-              builds: [{ id: context.fixedBuild.id, entry: context.fixedBuild.entry, runLocal: true }],
+              builds: builds,
               testEntry: view.entryRoot !== null ? join(view.entryRoot, view.testEntry) : view.testEntry,
               workflowId: view.workflowId,
               revision: view.workflowRevision,

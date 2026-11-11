@@ -30,6 +30,7 @@ function input(overrides: Partial<RouterInput>): RouterInput {
     state: "ABORTED",
     failure: null,
     side: null,
+    buildId: null,
     mismatches: [],
     failureOwner: null,
     evidencePaths: [],
@@ -104,6 +105,18 @@ describe("routeFailure — the six routing rules", () => {
   test("rule 1: baseline build failure goes to the build-writer", () => {
     const decision = routeFailure(input({ failure: BASELINE_BUILD, side: "baseline" }));
     expect(decision.kind).toBe("repair-build");
+  });
+
+  test("rule 1: the attributed build id travels into the repair evidence", () => {
+    const decision = routeFailure(
+      input({
+        failure: { ...BASELINE_BUILD, detail: { build_id: "libuv-static" } },
+        side: "baseline",
+        buildId: "libuv-static",
+      }),
+    );
+    expect(decision.kind).toBe("repair-build");
+    if (decision.kind === "repair-build") expect(decision.evidence.buildId).toBe("libuv-static");
   });
 
   test("rule 1 + environment: stops instead of repairing", () => {

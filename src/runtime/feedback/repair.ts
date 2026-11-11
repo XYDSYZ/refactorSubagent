@@ -187,6 +187,44 @@ export function composeBuildRepairBrief(evidence: RepairEvidence, context: {
 }
 
 /**
+ * Compose the build list for a build-repair round from the round-1
+ * checkpoint: the repaired build replaces its declared slot, every other
+ * declared build keeps running — shrinking the set would silently verify a
+ * different contract than round 1 did.
+ *
+ * Mapping rules (fail-closed):
+ *   - a single declared build is replaced outright (today's common case,
+ *     and the shape that predates build-id attribution);
+ *   - with several declared builds the failed slot is located by id
+ *     (attribution first, repaired id as the fallback);
+ *   - null when the repaired build cannot be mapped honestly — the caller
+ *     must halt instead of guessing which slot to replace.
+ */
+export function mergeRepairedBuilds(
+  checkpointBuilds: readonly {
+    readonly id: string;
+    readonly entry: string;
+    readonly runLocal: boolean;
+  }[],
+  fixedBuild: { readonly id: string; readonly entry: string },
+  failedBuildId: string | null,
+): { id: string; entry: string; runLocal: boolean }[] | null {
+  if (checkpointBuilds.length === 0) return null;
+  const repaired: { id: string; entry: string; runLocal: boolean } = {
+    id: fixedBuild.id,
+    entry: fixedBuild.entry,
+    runLocal: true,
+  };
+  if (checkpointBuilds.length === 1) return [repaired];
+  const targetId = failedBuildId ?? fixedBuild.id;
+  const index = checkpointBuilds.findIndex((build) => build.id === targetId);
+  if (index < 0) return null;
+  return checkpointBuilds.map((build, position) =>
+    position === index ? repaired : { id: build.id, entry: build.entry, runLocal: build.runLocal },
+  );
+}
+
+/**
  * Run the dedicated build-repair session. The session explores with the same
  * tool arrangement as the authoring build-writer and registers the fixed
  * workflow through the host's MCP registration tool. Returns the registered

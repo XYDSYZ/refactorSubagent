@@ -14,13 +14,13 @@ import {
   presetWorkflowsStage,
 } from "../src/runtime/stage-presets.js";
 import { loadReusableWorkflowsStage } from "../src/runtime/stage-resume.js";
-import { composeRefactorFeedback } from "../src/runtime/feedback/repair.js";
+import { composeRefactorFeedback, mergeRepairedBuilds } from "../src/runtime/feedback/repair.js";
 import { runFeedbackLoop, routerInputOf, type FeedbackLoopConfig, type RepairRoundContext } from "../src/runtime/feedback/coordinator.js";
 
 /**
  * Feedback-loop tests: pure orchestration over scripted round results and a
  * captured repair context — no pipeline, no AI. The dialogue-continuation
- * stage itself was live-verified by the Phase 0 spike (spike-resume.ts).
+ * stage itself was live-verified by the Phase 0 spike (scripts/spike-resume.ts).
  */
 
 function fakeResult(options: {
@@ -30,6 +30,7 @@ function fakeResult(options: {
   branch?: string;
   commitSha?: string;
   failure?: { category: string; component: string; reason: string } | null;
+  failureDetail?: Record<string, unknown>;
   mismatches?: readonly { name: string; reason: string }[];
 }): StageFlowResult {
   return {
@@ -83,7 +84,7 @@ function fakeResult(options: {
           component: options.failure.component,
           retryable: true,
           reason: options.failure.reason,
-          detail: {},
+          detail: options.failureDetail ?? {},
           at: "2026-01-01T00:00:00.000Z",
         },
     logDir: "D:\\fake\\log",
@@ -175,6 +176,31 @@ describe("routerInputOf", () => {
     );
     expect(input.side).toBe("candidate");
     expect(input.failure?.category).toBe("build");
+  });
+
+  test("extracts the failed build id from the attribution detail", () => {
+    const input = routerInputOf(
+      fakeResult({
+        state: "ABORTED",
+        failure: {
+          category: "build",
+          component: "build-workflow:baseline",
+          reason: "build b2 failed: gcc exited 1",
+        },
+        failureDetail: { build_id: "b2" },
+      }),
+    );
+    expect(input.buildId).toBe("b2");
+  });
+
+  test("build id stays null without structured attribution", () => {
+    const input = routerInputOf(
+      fakeResult({
+        state: "ABORTED",
+        failure: { category: "build", component: "build-workflow:baseline", reason: "gcc failed" },
+      }),
+    );
+    expect(input.buildId).toBeNull();
   });
 });
 
@@ -307,9 +333,35 @@ describe("runFeedbackLoop", () => {
     const context = captured.repairContexts[0]!;
     if (context.lane !== "build") throw new Error("expected build lane");
     expect(context.fixedBuild.id).toBe("fixed-build");
+    // Pre-attribution rounds carry no build id: the checkpoint's shape
+    // decides (the CLI's merge treats a single declared build as the slot).
+    expect(context.failedBuildId).toBeNull();
     // The candidate branch is preserved untouched by the build repair.
     expect(context.candidateBranch).toBe("refactor/agent-x");
     expect(captured.notifications.join("\n")).toContain("构建修理工");
+  });
+
+  test("build lane carries the attributed failed build id into the repair context", async () => {
+    const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+    const outcome = await runFeedbackLoop(
+      makeConfig([
+        fakeResult({
+          state: "ABORTED",
+          branch: "refactor/agent-x",
+          failure: {
+            category: "build",
+            component: "build-workflow:baseline",
+            reason: "build b2 failed: gcc exited 1",
+          },
+          failureDetail: { build_id: "b2" },
+        }),
+        fakeResult({ state: "ACCEPTED", branch: "refactor/agent-x" }),
+      ], captured),
+    );
+    expect(outcome.stoppedBecause).toBe("accepted");
+    const context = captured.repairContexts[0]!;
+    if (context.lane !== "build") throw new Error("expected build lane");
+    expect(context.failedBuildId).toBe("b2");
   });
 
   test("build repair that delivers nothing stops and keeps the evidence", async () => {
@@ -375,6 +427,38 @@ describe("runFeedbackLoop", () => {
     expect(outcome.stoppedBecause).toBe("missing-patch");
     expect(captured.repairContexts).toHaveLength(0);
     expect(captured.notifications.join("\n")).toContain("考卷");
+  });
+});
+
+describe("mergeRepairedBuilds", () => {
+  const SINGLE = [{ id: "b1", entry: "wf/build/b1.ts", runLocal: false }];
+  const SET = [
+    { id: "b1", entry: "wf/build/b1.ts", runLocal: false },
+    { id: "b2", entry: "wf/build/b2.ts", runLocal: true },
+  ];
+  const FIXED = { id: "b2.r2", entry: "D:\\fix\\b2.r2.ts" };
+
+  test("a single declared build is replaced outright", () => {
+    expect(mergeRepairedBuilds(SINGLE, FIXED, null)).toEqual([
+      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
+    ]);
+  });
+
+  test("multi-build sets replace the attributed slot and keep the rest verbatim", () => {
+    // Shrinking the set would verify a different contract than round 1.
+    expect(mergeRepairedBuilds(SET, FIXED, "b2")).toEqual([
+      { id: "b1", entry: "wf/build/b1.ts", runLocal: false },
+      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
+    ]);
+    expect(mergeRepairedBuilds(SET, FIXED, "b1")).toEqual([
+      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
+      { id: "b2", entry: "wf/build/b2.ts", runLocal: true },
+    ]);
+  });
+
+  test("an unmappable repair returns null instead of guessing", () => {
+    expect(mergeRepairedBuilds(SET, FIXED, "ghost")).toBeNull();
+    expect(mergeRepairedBuilds([], FIXED, "b1")).toBeNull();
   });
 });
 

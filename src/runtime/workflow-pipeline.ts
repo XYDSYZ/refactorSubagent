@@ -641,6 +641,7 @@ async function executeBuildList(
     if (result.status !== "pass") {
       return {
         ...result,
+        buildId: item.id,
         failure: `build ${item.id} failed: ${result.failure ?? result.status}`,
       };
     }
@@ -798,7 +799,11 @@ function buildFailureAttribution(
     category: "build",
     component: `build-workflow:${side}`,
     retryable: true,
-    detail: { status: execution.status, failure: execution.failure },
+    detail: {
+      status: execution.status,
+      failure: execution.failure,
+      ...(execution.buildId !== undefined ? { build_id: execution.buildId } : {}),
+    },
   };
 }
 

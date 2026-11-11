@@ -77,6 +77,8 @@ export interface RepairEvidence {
   component?: string;
   /** Which side the failure was measured on. */
   side?: "baseline" | "candidate";
+  /** Declared id of the build workflow that failed (multi-build sets). */
+  buildId?: string;
   /** The per-expectation behavior diffs (REJECTED rounds only). */
   mismatches?: readonly { name: string; reason: string }[];
   /** Paths the repairing dialogue should read (logs, verdict files). */

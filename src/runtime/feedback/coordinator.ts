@@ -88,6 +88,9 @@ export type RepairRoundContext =
   | {
       lane: "build";
       fixedBuild: { id: string; entry: string };
+      /** Declared id of the build that failed (from the attribution; null
+       *  when the round predated build-id attribution). */
+      failedBuildId: string | null;
       candidateBranch: string;
       baseSha: string;
       pinnedWorkflows: WorkflowsStage;
@@ -129,6 +132,10 @@ export function routerInputOf(result: StageFlowResult): RouterInput {
     : component.endsWith(":candidate")
       ? "candidate"
       : null;
+  const rawBuildId = failure?.detail["build_id"];
+  const buildId: RouterInput["buildId"] = typeof rawBuildId === "string" && rawBuildId.length > 0
+    ? rawBuildId
+    : null;
   const comparison = result.verification?.expectationComparison ?? null;
   const mismatches = comparison === null
     ? []
@@ -148,6 +155,7 @@ export function routerInputOf(result: StageFlowResult): RouterInput {
           detail: failure.detail,
         },
     side,
+    buildId,
     mismatches,
     failureOwner: failure === null ? null : classifyFailureOwner(failure.reason),
     evidencePaths: [
@@ -358,6 +366,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       context = {
         lane: "build",
         fixedBuild: fixed,
+        failedBuildId: decision.evidence.buildId ?? null,
         candidateBranch: patch.branch,
         baseSha: patch.base_sha,
         pinnedWorkflows,

@@ -40,6 +40,8 @@ export interface RouterInput {
   } | null;
   /** Side the attribution points at, when the component encodes one. */
   readonly side: "baseline" | "candidate" | null;
+  /** Declared id of the failed build workflow, from the attribution detail. */
+  readonly buildId: string | null;
   /** Behavior diffs of a REJECTED round (empty when none/absent). */
   readonly mismatches: readonly { name: string; reason: string }[];
   /** Owner classification of a test-side failure (script vs program). */
@@ -121,6 +123,7 @@ export function routeFailure(input: RouterInput): FeedbackDecision {
       ? { category: input.failure.category, component: input.failure.component }
       : {}),
     ...(input.side !== null ? { side: input.side } : {}),
+    ...(input.buildId !== null ? { buildId: input.buildId } : {}),
     ...(input.mismatches.length > 0 ? { mismatches: input.mismatches } : {}),
     ...(input.evidencePaths.length > 0 ? { evidencePaths: input.evidencePaths } : {}),
   };
