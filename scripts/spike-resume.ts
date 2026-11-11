@@ -6,8 +6,8 @@
  *
  * Go criteria: round 2 recalls the phrase AND reports the SAME session id.
  */
-import { runAgent } from "./src/agents/driver.ts";
-import { FileSessionStore } from "./src/runtime/session-store.ts";
+import { runAgent } from "../src/agents/driver.js";
+import { FileSessionStore } from "../src/runtime/session-store.js";
 import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 
