@@ -3,6 +3,7 @@ import type { Logger } from "../runtime/log.js";
 import { StageFailureError } from "../runtime/stage-failure.js";
 import { runAgent } from "./driver.js";
 import { REFACTOR_SYSTEM, refactorPrompt } from "./prompts.js";
+import { cRefactorSkillContext } from "./workflow-skills.js";
 import { DEFAULT_LIMITS, type SessionLimits } from "../config/limits.js";
 
 /**
@@ -48,7 +49,7 @@ export async function runRefactor(
   const limits = sessionHooks?.limits ?? DEFAULT_LIMITS.sessions.refactor;
   const run = await runAgent({
     cwd: worktreeDir,
-    prompt: refactorPrompt(task),
+    prompt: refactorPrompt(task, cRefactorSkillContext()),
     systemPrompt: REFACTOR_SYSTEM,
     allowedTools: [...REFACTOR_AGENT_TOOLS],
     skills: [...REFACTOR_SKILLS],

@@ -192,8 +192,9 @@ established from measured facts, throw a clear error rather than guessing.
 You may use context.plan for observable stages: const [id] = await plan.declare([{ title, children? }]); then
 await plan.begin(id) / plan.complete(id) / plan.fail(id, error). Declare at most a few steps.`;
 
-export function refactorPrompt(task: string): string {
+export function refactorPrompt(task: string, techniqueContext?: string): string {
   return [
+    ...(techniqueContext !== undefined ? [techniqueContext, ""] : []),
     `Task: ${task}`,
     "Work from the current directory; it already IS the candidate worktree.",
     "Read the relevant sources first, then plan the edit.",

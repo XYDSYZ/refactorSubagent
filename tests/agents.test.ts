@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { extractJson } from "../src/agents/driver.js";
 import { REFACTOR_AGENT_TOOLS, REFACTOR_SKILLS } from "../src/agents/refactor.js";
 import { TEST_WRITER_AGENT_TOOLS } from "../src/agents/workflow-session.js";
-import { C_REFACTOR_PLUGIN_DIR, TOOL_PLUGIN_DIR, sessionPluginDirs } from "../src/agents/workflow-skills.js";
+import { C_REFACTOR_PLUGIN_DIR, TOOL_PLUGIN_DIR, cRefactorSkillContext, sessionPluginDirs } from "../src/agents/workflow-skills.js";
+import { refactorPrompt } from "../src/agents/prompts.js";
 
 describe("extractJson", () => {
   test("parses fenced json block", () => {
@@ -86,5 +87,21 @@ describe("c-refactor-techniques skill wiring", () => {
         expect(text).toContain("反例");
       }
     }
+  });
+
+  test("the force-read context points at the real SKILL.md and lands in the prompt", () => {
+    // The SDK skills/plugins options are inert under the pinned SDK build, so
+    // the prompt-embedded absolute path IS the injection mechanism: it must
+    // name the exact on-disk file, mirror the workflow-spec wording, and be
+    // carried by refactorPrompt.
+    const context = cRefactorSkillContext();
+    expect(context).toContain("c-refactor:c-refactor-techniques");
+    expect(context).toContain(join(C_REFACTOR_PLUGIN_DIR, "skills", "c-refactor-techniques", "SKILL.md").split("\\").join("/"));
+    expect(context).toContain("Read this exact file");
+    const prompt = refactorPrompt("重构任务", context);
+    expect(prompt.indexOf(context)).toBe(0);
+    expect(prompt).toContain("Task: 重构任务");
+    // Backward compatibility: without the context the prompt is unchanged.
+    expect(refactorPrompt("任务").startsWith("Task: 任务")).toBe(true);
   });
 });
