@@ -3,6 +3,17 @@ import { join, resolve } from "node:path";
 /** Shared by SDK plugin loading, authoring sessions, and investigation evaluation. */
 export const TOOL_PLUGIN_DIR = resolve(import.meta.dir, "..", "..", ".claude", "plugins", "workflow-spec");
 
+/** C refactoring techniques plugin — referenced by name from the refactor session. */
+export const C_REFACTOR_PLUGIN_DIR = resolve(import.meta.dir, "..", "..", ".claude", "plugins", "c-refactor");
+
+/** Plugin directories every agent session loads; per-session `skills` filters visibility. */
+export function sessionPluginDirs(): { type: "local"; path: string }[] {
+  return [
+    { type: "local", path: TOOL_PLUGIN_DIR },
+    { type: "local", path: C_REFACTOR_PLUGIN_DIR },
+  ];
+}
+
 type WorkflowSkillName = "workflow-spec" | "verification-planning";
 
 export function workflowSkillPath(name: WorkflowSkillName): string {

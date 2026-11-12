@@ -23,6 +23,13 @@ export const REFACTOR_AGENT_TOOLS = [
 ] as const;
 
 /**
+ * Techniques skill (c-refactor plugin) visible to this session. Host-loaded
+ * and user-invocable:false — the model reads the topic documents as guidance,
+ * it cannot invoke the skill as a tool. Knowledge only; no extra capability.
+ */
+export const REFACTOR_SKILLS = ["c-refactor:c-refactor-techniques"] as const;
+
+/**
  * Refactor Agent — edits the candidate worktree. The refactor is deliberately
  * unbounded (no modification-scope manifest): the agent decides what to
  * change, and the behavior-preservation gate (identical workflows on baseline
@@ -44,6 +51,7 @@ export async function runRefactor(
     prompt: refactorPrompt(task),
     systemPrompt: REFACTOR_SYSTEM,
     allowedTools: [...REFACTOR_AGENT_TOOLS],
+    skills: [...REFACTOR_SKILLS],
     maxTurns: limits.maxTurns,
     model: limits.model,
     timeoutMs: limits.deadlineMs ?? undefined,

@@ -9,7 +9,7 @@ import {
   type SessionStore,
 } from "@anthropic-ai/claude-agent-sdk";
 
-import { TOOL_PLUGIN_DIR } from "./workflow-skills.js";
+import { sessionPluginDirs } from "./workflow-skills.js";
 
 /**
  * Operations no agent session may perform, whatever its allowlist says.
@@ -125,7 +125,7 @@ export async function runAgent(o: DriverOptions): Promise<DriverRun> {
       allowedTools: combinedAllowed,
       permissionMode: "acceptEdits",
       settingSources: ["user"],
-      plugins: [{ type: "local", path: TOOL_PLUGIN_DIR }],
+      plugins: sessionPluginDirs(),
       settings: { disableAllHooks: true, permissions: { deny: [...SESSION_DENY_RULES] } },
       // The SDK requires local persistence when mirroring to a sessionStore.
       persistSession: o.sessionStore !== undefined,
