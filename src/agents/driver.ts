@@ -110,6 +110,20 @@ export interface DriverOptions {
 }
 
 
+/**
+ * The SDK serializes `tools` into the CLI's strict `--tools` replacement: a
+ * list without "Skill" removes the Skill tool entirely, which hides every
+ * plugin skill regardless of `plugins`/`skills` (verified live against
+ * claude.exe 2.1.259 — the 0.3.245-era behavior differed). When a session
+ * names skills, restore the Skill tool; WHICH skills it may invoke stays
+ * bounded by the `skills` name list (mapped to Skill(name) permissions).
+ */
+export function sdkToolsOf(allowedTools: readonly string[], skills: readonly string[] | undefined): string[] {
+  const withSkill = skills !== undefined && skills.length > 0;
+  if (withSkill && !allowedTools.includes("Skill")) return [...allowedTools, "Skill"];
+  return [...allowedTools];
+}
+
 export async function runAgent(o: DriverOptions): Promise<DriverRun> {
   const timeoutMs = normalizeTimeout(o.timeoutMs);
   const executable = o.executable ?? resolveClaudeExecutable();
@@ -121,7 +135,7 @@ export async function runAgent(o: DriverOptions): Promise<DriverRun> {
     prompt: o.prompt,
     options: {
       cwd: o.cwd,
-      tools: combinedAllowed,
+      tools: sdkToolsOf(combinedAllowed, o.skills),
       allowedTools: combinedAllowed,
       permissionMode: "acceptEdits",
       settingSources: ["user"],

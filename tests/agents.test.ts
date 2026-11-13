@@ -1,7 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { extractJson } from "../src/agents/driver.js";
+import { extractJson, sdkToolsOf } from "../src/agents/driver.js";
 import { REFACTOR_AGENT_TOOLS, REFACTOR_SKILLS } from "../src/agents/refactor.js";
 import { TEST_WRITER_AGENT_TOOLS } from "../src/agents/workflow-session.js";
 import { C_REFACTOR_PLUGIN_DIR, TOOL_PLUGIN_DIR, cRefactorSkillContext, sessionPluginDirs } from "../src/agents/workflow-skills.js";
@@ -38,6 +38,25 @@ describe("session tool boundaries", () => {
     expect([...TEST_WRITER_AGENT_TOOLS].sort()).toEqual([
       "Edit", "Glob", "Grep", "Read", "Task", "Write",
     ]);
+  });
+});
+
+describe("sdkToolsOf — the Skill tool visibility contract", () => {
+  test("naming skills restores the Skill tool into the strict --tools set", () => {
+    // Without this the CLI's --tools replacement drops the Skill tool and
+    // hides every plugin skill (verified live: claude.exe 2.1.259).
+    expect(sdkToolsOf(["Read", "Bash"], ["c-refactor:c-refactor-techniques"]))
+      .toEqual(["Read", "Bash", "Skill"]);
+  });
+
+  test("no skills named: the tool set passes through untouched", () => {
+    expect(sdkToolsOf(["Read"], undefined)).toEqual(["Read"]);
+    expect(sdkToolsOf(["Read"], [])).toEqual(["Read"]);
+  });
+
+  test("Skill already present: no duplicate", () => {
+    expect(sdkToolsOf(["Read", "Skill"], ["workflow-spec:workflow-spec"]))
+      .toEqual(["Read", "Skill"]);
   });
 });
 
