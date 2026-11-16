@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
 import { SessionStore } from "../orchestrator/store.js";
@@ -186,6 +186,8 @@ const RefactorCheckpointData = z.object({
 export interface WorkflowsCheckpointView {
   readonly testEntry: string;
   readonly entryRoot: string | null;
+  /** Exam source hash when the checkpoint recorded one (reuse guard). */
+  readonly testSourceHash?: string;
   readonly workflowId: string;
   readonly workflowRevision: number;
   readonly builds: readonly {
@@ -219,6 +221,7 @@ export function loadWorkflowsCheckpointView(
   return {
     testEntry: parsed.data.test_entry,
     entryRoot: parsed.data.entry_root ?? null,
+    ...(parsed.data.test_source_hash !== undefined ? { testSourceHash: parsed.data.test_source_hash } : {}),
     workflowId: parsed.data.workflow_id,
     workflowRevision: parsed.data.workflow_revision,
     builds: parsed.data.builds.map((build) => ({
@@ -228,6 +231,34 @@ export function loadWorkflowsCheckpointView(
       runLocal: build.run_local,
     })),
   };
+}
+
+/**
+ * Build the pinned workflows stage from a VERIFIED checkpoint view (the
+ * effective plan). Same honesty rules as the checkpoint path: every source
+ * on disk must hash to what the view recorded — a drifted exam or build
+ * returns null instead of pinning a lie.
+ */
+export function loadReusableWorkflowsStageFromView(
+  repoPath: string,
+  view: WorkflowsCheckpointView,
+): WorkflowsStage | null {
+  const entryRoot = view.entryRoot ?? repoPath;
+  const exam = join(entryRoot, view.testEntry);
+  if (!existsSync(exam)) return null;
+  if (view.testSourceHash === undefined || sha256SourceFile(exam) !== view.testSourceHash) return null;
+  for (const build of view.builds) {
+    const buildPath = isAbsolute(build.entry) ? build.entry : join(repoPath, build.entry);
+    if (!existsSync(buildPath)) return null;
+    if (sha256SourceFile(buildPath) !== build.sourceHash) return null;
+  }
+  return presetWorkflowsStage({
+    builds: view.builds.map((build) => ({ id: build.id, entry: build.entry, runLocal: build.runLocal })),
+    testEntry: view.testEntry,
+    workflowId: view.workflowId,
+    revision: view.workflowRevision,
+    ...(view.entryRoot !== null ? { entryRoot: view.entryRoot } : {}),
+  });
 }
 
 /**

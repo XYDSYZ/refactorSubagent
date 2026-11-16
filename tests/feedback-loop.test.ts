@@ -463,6 +463,56 @@ describe("runFeedbackLoop", () => {
     }
   });
 
+  test("a code-repair round followed by an exam-script error switches to the test lane", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rfr-fbstate-"));
+    try {
+      const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+      const outcome = await runFeedbackLoop(
+        makeConfig(
+          [
+            // Round 1: behavior mismatch → refactor lane (both dialogues live).
+            fakeResult({
+              state: "REJECTED",
+              dialogueId: "conv-refactor",
+              workflowsDialogue: "conv-author",
+              branch: "refactor/agent-x",
+              commitSha: "c1",
+              mismatches: MISMATCHES,
+            }),
+            // Round 2 (refactor repair): the code now compiles but the EXAM
+            // itself errors as a script. The continuation reports no fresh
+            // dialogue ids — the durable handles must fill the gap.
+            fakeResult({
+              state: "ABORTED",
+              dialogueId: "conv-refactor",
+              workflowsDialogue: null,
+              branch: "refactor/agent-x",
+              commitSha: "c2",
+              failure: {
+                category: "test",
+                component: "test-workflow:baseline",
+                reason: "TypeError: ctx.fs.read is not a function",
+              },
+            }),
+            fakeResult({ state: "ACCEPTED", branch: "refactor/agent-x" }),
+          ],
+          captured,
+          3,
+          stateDir,
+        ),
+      );
+      expect(outcome.stoppedBecause).toBe("accepted");
+      expect(captured.rounds).toEqual(["initial", "repair-2", "repair-3"]);
+      const context = captured.repairContexts[1]!;
+      if (context.lane !== "test") throw new Error("expected test lane");
+      // The exam repair continues the ORIGINAL authoring dialogue via the
+      // durable handle (round 2 returned no test-writer id).
+      expect(context.dialogueId).toBe("conv-author");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("repairing build B after build A is progress, not a no-progress loop", async () => {
     const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
     const outcome = await runFeedbackLoop(

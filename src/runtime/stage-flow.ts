@@ -664,6 +664,9 @@ export function continuedWorkflowsStage(spec: {
   /** Round 1's e2e dir — the resume reads the authoring conversation from
    *  the store it was persisted to. */
   readonly dialogueRoot: string;
+  /** Effective-plan builds (absolute entries) adopted into this round's
+   *  registry, so a re-declared dependency set keeps resolving them. */
+  readonly adoptBuilds?: readonly { readonly id: string; readonly entry: string }[];
 }): WorkflowsStage {
   return async (ctx, input) => {
     ctx.logger.info("continuing test-writer dialogue with failure feedback");
@@ -685,6 +688,7 @@ export function continuedWorkflowsStage(spec: {
         testEntryOverride: spec.testEntry,
         resume: { dialogueId: spec.dialogueId, feedback: spec.feedback },
         resumeStoreRoot: spec.dialogueRoot,
+        ...(spec.adoptBuilds !== undefined ? { adoptBuilds: spec.adoptBuilds } : {}),
       });
       declared = authored.resolution;
       dialogueId = authored.dialogueId;
@@ -1127,6 +1131,9 @@ async function runDeclaredResolution(options: {
    *  conversation from the store root it was persisted to (round 1's e2e
    *  dir), not this round's own store. */
   readonly resumeStoreRoot?: string;
+  /** Builds from the effective plan (earlier rounds of this run, absolute
+   *  entries) — adopted read-only so exam repairs keep resolving them. */
+  readonly adoptBuilds?: readonly { readonly id: string; readonly entry: string }[];
 }): Promise<{ resolution: DeclaredAgentResolution; dialogueId?: string }> {
   const testRelDir = join(".refactor", "runs", options.sessionId, "workflows", "test");
   const testEntry = options.testEntryOverride ?? join(options.repoDir, testRelDir, "test-workflow.ts");
@@ -1164,13 +1171,16 @@ async function runDeclaredResolution(options: {
   });
 
   // Rebuild the registry (run-local files restored from disk) to resolve
-  // declared build ids to their workflow entries.
+  // declared build ids to their workflow entries. Adopted builds carry the
+  // effective plan's earlier-round builds into repair rounds (their files
+  // live under ANOTHER session's run dir and never reached the library).
   const registry = new LocalDependencyRegistry({
     workspaceRoot: options.repoDir,
     sessionRoot: options.sessionRoot,
     sessionId: options.sessionId,
     host: options.host,
     project: options.project,
+    ...(options.adoptBuilds !== undefined ? { adoptBuilds: options.adoptBuilds } : {}),
   });
   const buildSources: { id: string; entry: string; runLocal: boolean }[] = [];
   for (const id of session.declaredBuilds) {
