@@ -165,17 +165,41 @@ export function routerInputOf(result: StageFlowResult): RouterInput {
   };
 }
 
-/** Cheap identity of what a round produced: the measured candidate commit. */
+/** Cheap identity of what a round produced. Lane-aware by construction:
+ *  a refactor repair moves the candidate commit, a build repair swaps a
+ *  declared build (id/entry), a test repair bumps the exam revision — the
+ *  previous commit-only hash read every build/test repair as "no change". */
 function artifactHashOf(result: StageFlowResult): string | null {
-  return result.patch?.commit_sha ?? null;
+  const parts = [
+    result.patch?.commit_sha ?? "no-commit",
+    "builds:" + (result.declared?.declaredSet.builds.map((build) => build.id).join("|") ?? "none"),
+    "exam:" + (result.declared !== null
+      ? `${result.declared.declaredSet.test_workflow_id}:${String(result.declared.declaredSet.test_workflow_revision)}`
+      : "none"),
+  ];
+  return parts.join("|");
 }
 
-/** Identity of how a round failed: the routed decision plus diff names. */
+/** Unbiased digest of the raw failure text so "build A broke" and "build B
+ *  broke" never share a signature even when the routed decision matches. */
+function reasonDigest(reason: string): string {
+  let hash = 5381;
+  for (let index = 0; index < reason.length; index++) {
+    hash = ((hash << 5) + hash + reason.charCodeAt(index)) | 0;
+  }
+  return (hash >>> 0).toString(36);
+}
+
+/** Identity of how a round failed: the routed decision, the failing side and
+ *  build (from the structured attribution), the raw error digest, and the
+ *  behavior-diff names. Without the build id and error digest, "build A
+ *  repaired, now build B fails" reads as two identical rounds. */
 function failureSignatureOf(result: StageFlowResult): string | null {
   const input = routerInputOf(result);
   const decision = routeFailure(input);
   const names = input.mismatches.map((mismatch) => mismatch.name).sort().join("|");
-  return `${decision.kind}:${names}`;
+  const reason = input.failure === null ? "" : reasonDigest(input.failure.reason);
+  return `${decision.kind}:${input.side ?? "none"}:${input.buildId ?? "none"}:${reason}:${names}`;
 }
 
 export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<FeedbackLoopOutcome> {
@@ -186,6 +210,16 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
     : null;
   if (persisted !== null && persisted.budgetTotal !== config.budget) persisted = null;
   let budgetUsed = persisted?.budgetUsed ?? 0;
+  /** Budget snapshot written IMMEDIATELY when a unit is consumed — an
+   *  interrupted repair (crash, kill, model-session halt mid-round) must not
+   *  look like unspent budget on the next launch. */
+  const persistBudget = (): void => {
+    if (config.stateDir === undefined) return;
+    const base = persisted ?? freshFeedbackState(config.budget);
+    base.budgetUsed = budgetUsed;
+    persisted = base;
+    saveFeedbackState(config.stateDir, base);
+  };
   const persist = (record: FeedbackRoundOutcome, result: StageFlowResult): void => {
     if (config.stateDir === undefined) return;
     const base = persisted ?? freshFeedbackState(config.budget);
@@ -271,7 +305,10 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
     let context: RepairRoundContext | { error: "missing-dialogue" | "missing-patch" | "missing-input" | "repair-failed"; detail: string };
 
     if (decision.kind === "repair-refactor") {
-      const dialogueId = result.refactorDialogueId;
+      // Durable dialogue handles: a lane that did not run the refactor AI
+      // (e.g. the previous round was a build repair) keeps the id from the
+      // last round that did, so lane SWITCHES continue the original chat.
+      const dialogueId = result.refactorDialogueId ?? persisted?.dialogues.refactor ?? null;
       const patch = result.patch;
       if (dialogueId === null) {
         config.notify("本轮没有可续写的重构对话句柄（会话未上报对话编号）；无法续写，停止。");
@@ -307,6 +344,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         sessionId,
       };
       budgetUsed += 1;
+      persistBudget();
       config.notify(
         `第 ${String(round)} 轮反馈修复开始：我向原重构对话追加了失败证据（${decision.trigger}），` +
           `考卷沿用第 1 轮版本，从候选分支 ${patch.branch} 继续施工` +
@@ -314,7 +352,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
           `。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
       );
     } else if (decision.kind === "repair-test") {
-      const dialogueId = result.workflowsDialogueId;
+      const dialogueId = result.workflowsDialogueId ?? persisted?.dialogues.testWriter ?? null;
       const testEntry = config.locateExamEntry();
       const patch = result.patch;
       if (dialogueId === null || testEntry === null) {
@@ -352,6 +390,11 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         config.notify("无法组装构建修复简报（检查点不可用）；停止。");
         return { result, rounds, stoppedBecause: "missing-input", stopDetail: null };
       }
+      // Consume the budget unit BEFORE dispatching the repair session: a
+      // session that tries and fails (or a run interrupted mid-repair) has
+      // still spent the attempt, and the durable state must say so.
+      budgetUsed += 1;
+      persistBudget();
       config.notify(`第 ${String(round)} 轮构建方案修复开始：我派出了构建修理工。`);
       const fixed = await config.runBuildRepair(brief, round);
       if (fixed === null) {
@@ -372,7 +415,6 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         pinnedWorkflows,
         sessionId,
       };
-      budgetUsed += 1;
       config.notify(
         `构建修理工交付了修复方案 ${fixed.id}；两侧将重新构建并重新验证。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
       );

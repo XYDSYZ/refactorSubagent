@@ -103,6 +103,7 @@ function makeConfig(
   script: readonly StageFlowResult[],
   captured: Captured,
   budget = 3,
+  stateDir?: string,
 ): FeedbackLoopConfig {
   let call = 0;
   const fakeStage = (async () => ({})) as never;
@@ -122,6 +123,7 @@ function makeConfig(
     runBuildRepair: async () => ({ id: "fixed-build", entry: "D:\\fake\\fixed-build.ts" }),
     loadBaselineObservations: () => null,
     sessionIdFor: (round) => `real-session-${round === 1 ? "base" : `fb${String(round)}`}`,
+    ...(stateDir !== undefined ? { stateDir } : {}),
     runRepairRound: async (round, context) => {
       captured.rounds.push(`repair-${String(round)}`);
       captured.repairContexts.push(context);
@@ -377,6 +379,129 @@ describe("runFeedbackLoop", () => {
     expect(outcome.stoppedBecause).toBe("repair-failed");
     expect(captured.repairContexts).toHaveLength(0);
     expect(captured.notifications.join("\n")).toContain("没有交付可用的修复方案");
+  });
+
+  test("a failed build repair still consumes and persists the budget unit", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rfr-fbstate-"));
+    try {
+      const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+      const outcome = await runFeedbackLoop(
+        {
+          ...makeConfig(
+            [
+              fakeResult({
+                state: "ABORTED",
+                branch: "refactor/agent-x",
+                failure: {
+                  category: "build",
+                  component: "build-workflow:baseline",
+                  reason: "build b1 failed: gcc exited 1",
+                },
+                failureDetail: { build_id: "b1" },
+              }),
+            ],
+            captured,
+            1,
+            stateDir,
+          ),
+          runBuildRepair: async () => null,
+        },
+      );
+      expect(outcome.stoppedBecause).toBe("repair-failed");
+      // The attempt WAS spent even though the session delivered nothing.
+      const state = JSON.parse(readFileSync(join(stateDir, "feedback-state.json"), "utf8"));
+      expect(state.budgetUsed).toBe(1);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("lane switches continue the dialogue from the durable handles", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rfr-fbstate-"));
+    try {
+      const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+      const outcome = await runFeedbackLoop(
+        makeConfig(
+          [
+            fakeResult({
+              state: "ABORTED",
+              dialogueId: "conv-refactor",
+              workflowsDialogue: "conv-author",
+              branch: "refactor/agent-x",
+              commitSha: "c1",
+              failure: {
+                category: "build",
+                component: "build-workflow:baseline",
+                reason: "build b1 failed: gcc exited 1",
+              },
+              failureDetail: { build_id: "b1" },
+            }),
+            // The BUILD repair round runs no refactor AI: its result carries
+            // no dialogue ids, but the code under it now misbehaves.
+            fakeResult({
+              state: "REJECTED",
+              branch: "refactor/agent-x",
+              commitSha: "c2",
+              mismatches: MISMATCHES,
+            }),
+            fakeResult({ state: "ACCEPTED", branch: "refactor/agent-x" }),
+          ],
+          captured,
+          3,
+          stateDir,
+        ),
+      );
+      expect(outcome.stoppedBecause).toBe("accepted");
+      expect(captured.rounds).toEqual(["initial", "repair-2", "repair-3"]);
+      const context = captured.repairContexts[1]!;
+      if (context.lane !== "refactor") throw new Error("expected refactor lane");
+      // Round 3 continues the ORIGINAL refactor dialogue despite round 2
+      // returning no dialogue id (the durable handle fills the gap).
+      expect(context.dialogueId).toBe("conv-refactor");
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("repairing build B after build A is progress, not a no-progress loop", async () => {
+    const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+    const outcome = await runFeedbackLoop(
+      makeConfig(
+        [
+          fakeResult({
+            state: "ABORTED",
+            branch: "refactor/agent-x",
+            commitSha: "c-stale",
+            failure: {
+              category: "build",
+              component: "build-workflow:baseline",
+              reason: "build b1 failed: gcc exited 1",
+            },
+            failureDetail: { build_id: "b1" },
+          }),
+          // Build A was repaired; now build B fails. The candidate commit is
+          // unchanged (build repairs do not touch candidate code).
+          fakeResult({
+            state: "ABORTED",
+            branch: "refactor/agent-x",
+            commitSha: "c-stale",
+            failure: {
+              category: "build",
+              component: "build-workflow:baseline",
+              reason: "build b2 failed: cmake configure failed",
+            },
+            failureDetail: { build_id: "b2" },
+          }),
+          fakeResult({ state: "ACCEPTED", branch: "refactor/agent-x" }),
+        ],
+        captured,
+      ),
+    );
+    expect(outcome.stoppedBecause).toBe("accepted");
+    expect(captured.rounds).toEqual(["initial", "repair-2", "repair-3"]);
+    const context = captured.repairContexts[1]!;
+    if (context.lane !== "build") throw new Error("expected build lane");
+    expect(context.failedBuildId).toBe("b2");
   });
 
   test("test-script failure continues the authoring dialogue (test lane)", async () => {
