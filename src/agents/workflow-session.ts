@@ -85,8 +85,9 @@ export interface WorkflowSessionAgentOptions {
   readonly logger?: Logger;
   /** Mirror the full AI session transcript to this store. */
   readonly sessionStore?: SessionStore;
-  /** Continue this prior conversation (SDK resume) instead of a new chat. */
-  readonly resumeDialogueId?: string;
+  /** Continue this prior conversation (SDK resume) instead of a new chat.
+   *  Forwarded verbatim as the driver's `resumeSessionId`. */
+  readonly resumeSessionId?: string;
 }
 
 /**
@@ -283,7 +284,7 @@ export async function runWorkflowSession(
       stallTimeoutMs: limits.stallMs,
       logger: options.logger,
       sessionStore: options.sessionStore,
-      ...(options.resume !== undefined ? { resumeDialogueId: options.resume.dialogueId } : {}),
+      ...(options.resume !== undefined ? { resumeSessionId: options.resume.dialogueId } : {}),
     });
   } finally {
     verificationAnalysis.close();
@@ -293,7 +294,17 @@ export async function runWorkflowSession(
   const declaredBuilds = await registry.currentDeclared();
   const declaredExplicitly = await registry.declaredExplicitly();
   let failure: WorkflowSessionFailureLike | null = null;
-  if (run.isError && run.result.length === 0) {
+  if (run.resumeMismatch === true) {
+    // The SDK answered under a DIFFERENT conversation id — that is a fresh
+    // chat, not a continuation. Treating it as success would spend the repair
+    // round without the authoring context, so fail loudly instead.
+    failure = {
+      category: "model-session",
+      reason: "test-writer resume landed in a different conversation (session id mismatch)",
+      retryable: false,
+      detail: { resume_mismatch: true, ...(run.sessionId !== undefined ? { returned_session_id: run.sessionId } : {}) },
+    };
+  } else if (run.isError && run.result.length === 0) {
     failure = {
       category: "model-session",
       reason: "test-writer session failed without output",
@@ -374,6 +385,7 @@ async function defaultRunAgent(
     stallTimeoutMs: o.stallTimeoutMs,
     logger: o.logger,
     sessionStore: o.sessionStore,
+    ...(o.resumeSessionId !== undefined ? { resumeSessionId: o.resumeSessionId } : {}),
   });
 }
 

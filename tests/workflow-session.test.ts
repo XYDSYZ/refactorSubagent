@@ -68,6 +68,8 @@ interface RunnerBehavior {
   timedOut?: boolean;
   result?: string;
   runnerError?: boolean;
+  /** Simulate the SDK answering under a DIFFERENT conversation id. */
+  resumeMismatch?: boolean;
 }
 
 function makeSessionHarness(behavior: RunnerBehavior, limits?: SessionLimits) {
@@ -92,6 +94,7 @@ function makeSessionHarness(behavior: RunnerBehavior, limits?: SessionLimits) {
     result: string;
     isError: boolean;
     timedOut: boolean;
+    resumeMismatch?: boolean;
   }> => {
     capturedOptions = o;
     if (behavior.runnerError) throw new Error("runner disconnected");
@@ -124,6 +127,7 @@ function makeSessionHarness(behavior: RunnerBehavior, limits?: SessionLimits) {
       result: behavior.result ?? "session done",
       isError: behavior.isError ?? false,
       timedOut: behavior.timedOut ?? false,
+      ...(behavior.resumeMismatch ? { resumeMismatch: true } : {}),
     };
   };
 
@@ -132,7 +136,7 @@ function makeSessionHarness(behavior: RunnerBehavior, limits?: SessionLimits) {
     sessionRoot,
     testEntry,
     analysisPath,
-    run: (): Promise<WorkflowSessionResult> =>
+    run: (extra?: { resume?: { dialogueId: string; feedback: string } }): Promise<WorkflowSessionResult> =>
       runWorkflowSession({
         repoDir,
         sessionRoot,
@@ -142,6 +146,7 @@ function makeSessionHarness(behavior: RunnerBehavior, limits?: SessionLimits) {
         host: minimalHost(),
         project: minimalProject(repoDir),
         ...(limits !== undefined ? { limits } : {}),
+        ...(extra !== undefined ? extra : {}),
         runAgentFn: runner,
       }),
     captured: () => capturedOptions,
@@ -282,5 +287,28 @@ describe("runWorkflowSession", () => {
       expect(late.isError).toBe(true);
       expect(mcpText(late)).toContain("closed");
     });
+  });
+
+  test("exam-repair resume forwards the dialogue id as resumeSessionId and drops the system prompt", async () => {
+    const h = makeSessionHarness({ writeTestEntry: true, declared: true, submitAnalysis: true });
+    const result = await h.run({ resume: { dialogueId: "original-dialogue-id", feedback: "修复考卷解析" } });
+    expect(result.ok).toBe(true);
+    const o = h.captured()!;
+    // The dialogue id MUST reach the driver's resume option — a dropped id
+    // silently starts a fresh chat that loses the authoring context.
+    expect(o.resumeSessionId).toBe("original-dialogue-id");
+    expect(o.systemPrompt).toBeUndefined(); // the stored conversation carries its own
+    expect(o.prompt).toContain("修复考卷解析");
+    expect(o.prompt).toContain("续写提醒");
+  });
+
+  test("a resume answered under a different conversation id fails loudly", async () => {
+    const h = makeSessionHarness({ writeTestEntry: true, declared: true, submitAnalysis: true, resumeMismatch: true });
+    const result = await h.run({ resume: { dialogueId: "original-dialogue-id", feedback: "修复考卷解析" } });
+    expect(result.ok).toBe(false);
+    const failure = asWorkflowSessionFailure(result.failure);
+    expect(failure?.category).toBe("model-session");
+    expect(failure?.retryable).toBe(false);
+    expect(failure?.reason).toContain("different conversation");
   });
 });
