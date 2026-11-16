@@ -31,9 +31,9 @@ import {
   extractPipelineArgs,
   resolvePipeline,
 } from "../src/config/pipeline.js";
-import { runStageFlow } from "../src/runtime/stage-flow.js";
+import { runStageFlow, type StageFlowResult, type StageFlowRequest } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
-import { runStageFlowResume } from "../src/runtime/stage-resume.js";
+import { runFeedbackStageFlow } from "../src/runtime/feedback/run.js";
 
 installOwnedProcessSignalHandlers();
 
@@ -137,28 +137,28 @@ async function executeRun(
   // the pipeline config / --stage selected, and injections are forwarded so
   // the resumed run verifies the same environment as the failed one.
   const resumeFrom = command.resume;
-  const result = resumeFrom !== null
-    ? await runStageFlowResume({
-        repoPath: repo,
-        task: command.task,
-        sessionRoot,
-        sessionId,
-        sourceSessionId: resumeFrom,
-        ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
-        ...(command.injections.length > 0 ? { injections: command.injections } : {}),
-        baseFlow: flow,
-        limitOverrides: overrides,
-      })
-    : await runStageFlow({
-        repoPath: repo,
-        task: command.task,
-        sessionRoot,
-        sessionId,
-        ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
-        ...(command.injections.length > 0 ? { injections: command.injections } : {}),
-        limitOverrides: overrides,
-        flow,
-      });
+  const request: StageFlowRequest = {
+    repoPath: repo, task: command.task, sessionRoot, sessionId, flow,
+    ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
+    ...(command.injections.length > 0 ? { injections: command.injections } : {}),
+    limitOverrides: overrides,
+  };
+  let result: StageFlowResult;
+  let autoRetryMeta: { rounds: number; stoppedBecause: string; lastSession: string } | null = null;
+  if (command.autoRetry > 0 || resumeFrom !== null) {
+    const outcome = await runFeedbackStageFlow(request, {
+      budget: command.autoRetry, resumeFrom,
+      notify: (message) => console.error(message),
+    });
+    result = outcome.result;
+    autoRetryMeta = {
+      rounds: outcome.rounds.length,
+      stoppedBecause: outcome.stoppedBecause,
+      lastSession: outcome.rounds.at(-1)!.sessionId,
+    };
+  } else {
+    result = await runStageFlow(request);
+  }
   const declaredBuilds = result.declared?.declaredSet.builds.map((build) => build.id) ?? [];
   const summary = {
     state: result.state,
@@ -170,6 +170,7 @@ async function executeRun(
     injected_stages: result.provenance.injected,
     verification_authoritative: result.provenance.verification_authoritative,
     ...(result.provenance.resume !== undefined ? { resumed_from: result.provenance.resume } : {}),
+    ...(autoRetryMeta !== null ? { auto_retry: autoRetryMeta } : {}),
     declared_builds: declaredBuilds,
     baseline_build: result.verification?.baselineBuild?.status ?? null,
     candidate_build: result.verification?.candidateBuild?.status ?? null,
@@ -199,6 +200,11 @@ async function executeRun(
     if (result.provenance.resume !== undefined) {
       console.log(
         `resumed from: ${result.provenance.resume.source_session} (reused: ${result.provenance.resume.reused_stages.join(", ") || "none"})`,
+      );
+    }
+    if (autoRetryMeta !== null) {
+      console.log(
+        `auto retry: ${autoRetryMeta.rounds} rounds (${autoRetryMeta.stoppedBecause}); final session: ${autoRetryMeta.lastSession}`,
       );
     }
     if (result.provenance.injected.length > 0) {
