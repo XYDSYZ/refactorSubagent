@@ -152,6 +152,8 @@ export interface StageFlowRequest {
    */
   readonly injections?: readonly InjectionSpec[];
   readonly sessionId: string;
+  /** Shared AI transcript directory for all rounds of one feedback run. */
+  readonly dialogueRoot?: string;
   /** CLI layers on top of the user/project config files (see config/limits). */
   readonly limitOverrides?: LayerOverrides;
   readonly knownEnvironmentPatterns?: readonly RegExp[];
@@ -353,7 +355,7 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   // under the run dir so slow runs can be analyzed at full fidelity without
   // raising the run.jsonl log level. One adapter per run; the SDK key is
   // {projectKey, sessionId} so each session lands in its own file.
-  const sessionStore = new FileSessionStore(logger.runDir);
+  const sessionStore = new FileSessionStore(req.dialogueRoot ?? logger.runDir);
   const ctx: StageContext = {
     repoPath: req.repoPath,
     task: req.task,
@@ -1058,6 +1060,7 @@ function workflowsCheckpointData(
       entry: relative(entryRoot, join(repoPath, b.entry)).split("\\").join("/"),
       source_hash: b.source_hash,
       run_local: b.run_local,
+      materials: b.materials ?? [],
     })),
   };
 }
@@ -1151,6 +1154,7 @@ async function runDeclaredResolution(options: {
       : options.sessionStore,
     limits: options.limits,
     ...(options.resume !== undefined ? { resume: options.resume } : {}),
+    adoptBuilds: options.adoptBuilds,
   });
   if (!session.ok) {
     const f = asWorkflowSessionFailure(session.failure);

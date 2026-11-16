@@ -74,9 +74,9 @@ export interface RunCommand {
   /** Aborted session id to resume from its stage checkpoints (null = fresh run). */
   resume: string | null;
   /**
-   * After a REJECTED verdict, re-run up to N more times; each retry is a fresh
-   * session whose task carries the previous round's behavior-diff lessons.
-   * Program-orchestrated, hard-capped; 0 disables (default 3).
+   * Maximum feedback repairs for one run, including attempts before --resume.
+   * Continue the responsible conversation (or launch a build repair session).
+   * 0 disables repairs; default 3.
    */
   autoRetry: number;
   format: CliFormat;
@@ -391,19 +391,21 @@ Resume (checkpoint restart):
                               Completed stages whose facts still verify on disk
                               (workflow sources, candidate branch, unchanged
                               repo HEAD) are reused; verification always re-runs.
-                              The new session id defaults to <id>-resume.
+                              --session sets the new execution id; otherwise
+                              a new run id is generated.
 
-Auto-retry (after a REJECTED verdict):
-  --auto-retry <max>          When the verdict is REJECTED, run up to <max>
-                              more FRESH sessions. Each retry appends the
-                              previous round's per-expectation behavior diffs
-                              to the task and re-runs the SAME round-1 exam
-                              (loaded from its checkpoint), so rounds stay
-                              comparable. Stops on ACCEPTED, on two identical
-                              consecutive failure signatures, on ABORTED, and
-                              on non-authoritative verification; every stop
-                              prints a plain-language report. 0 disables;
-                              the default is 3.
+Feedback repairs:
+  --auto-retry <max>          Total repair attempts for this run (default 3).
+                              Behavior mismatches and candidate code failures
+                              continue the original refactor conversation.
+                              Test script errors continue the original writer;
+                              baseline build errors start a build repair agent.
+                              Repairs retain the latest complete workflow set.
+                              --resume retains attempts already spent and the
+                              original conversations; it does not reset the total.
+                              Stops on ACCEPTED, exhausted attempts, unchanged
+                              content and failure, or an unrepairable failure.
+                              0 disables automatic repairs.
 
 Stage sources (accepted by "run"), later wins:
   --pipeline-file <path>      Extra pipeline layer, merged in order (repeatable)

@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
 import type {
   DialogueHandles,
   FeedbackRoundRecord,
@@ -9,7 +10,7 @@ import type {
 /**
  * feedback/state — durable run-level coordination state.
  *
- * `feedback-state.json` lives in the RUN's e2e dir (sibling of run.jsonl):
+ * `feedback-state.json` lives in `.refactor/feedback/<root-session>/`:
  * terminal verdicts stay immutable per the state machine; this sidecar only
  * coordinates the loop ABOVE them. Resuming the same run keeps the budget
  * already spent; the configured total stays the total.
@@ -94,4 +95,19 @@ export function detectNoProgress(
   if (older === null || newer === null) return false;
   if (olderFail === null || newerFail === null) return false;
   return older === newer && olderFail === newerFail;
+}
+
+const FeedbackOwner = z.object({ rootSessionId: z.string().min(1) });
+
+/** Each round points to its run-level state; never infer ownership from an id suffix. */
+export function loadFeedbackOwner(sessionRoot: string, sessionId: string): string {
+  const path = join(sessionRoot, ".refactor", "e2e", sessionId, "feedback-run.json");
+  if (!existsSync(path)) return sessionId;
+  return FeedbackOwner.parse(JSON.parse(readFileSync(path, "utf8"))).rootSessionId;
+}
+
+export function saveFeedbackOwner(sessionRoot: string, sessionId: string, rootSessionId: string): void {
+  const dir = join(sessionRoot, ".refactor", "e2e", sessionId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "feedback-run.json"), `${JSON.stringify({ rootSessionId })}\n`, "utf8");
 }

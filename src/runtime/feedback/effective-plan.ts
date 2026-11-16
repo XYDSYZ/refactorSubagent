@@ -1,60 +1,41 @@
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { z } from "zod";
 import type { WorkflowsCheckpointView } from "../stage-resume.js";
+import { readVerificationMaterials } from "../../workflow/verification-materials.js";
 
-/**
- * effective-plan — the loop's "currently valid full plan".
- *
- * The round-1 checkpoint is immutable history; repairs move the plan FORWARD:
- * a build repair replaces its slot, an exam repair bumps the exam version,
- * and every later round (execution, re-repair, observation reuse) reads this
- * file instead of re-deriving from round 1 — otherwise repair N's work is
- * silently undone by repair N+1 re-selecting the round-1 source.
- *
- * Build entries are repo-relative (the declared-set convention); the exam is
- * relative to `entryRoot` (null = repo root). `baselineExamHash` stamps which
- * exam version the stored baseline observations were measured under —
- * baseline reuse is honest only while the exam still hashes to it.
- */
+const MaterialPin = z.object({ path: z.string(), sha256: z.string() });
+const PlanFile = z.object({
+  entryRoot: z.string().nullable(),
+  testEntry: z.string(),
+  testSourceHash: z.string(),
+  workflowId: z.string(),
+  workflowRevision: z.number().int().positive(),
+  builds: z.array(z.object({
+    id: z.string(), entry: z.string(), sourceHash: z.string(),
+    runLocal: z.boolean(), materials: z.array(MaterialPin),
+  })),
+  baseline: z.object({ sessionId: z.string(), baseSha: z.string(), planHash: z.string() }).nullable(),
+});
 
-export interface EffectivePlan {
-  readonly entryRoot: string | null;
-  readonly testEntry: string;
-  readonly testSourceHash: string;
-  readonly workflowId: string;
-  readonly workflowRevision: number;
-  readonly builds: readonly {
-    readonly id: string;
-    readonly entry: string;
-    readonly sourceHash: string;
-    readonly runLocal: boolean;
-  }[];
-  readonly baselineExamHash: string;
+/** The current full plan, never re-selected from round one after a repair.
+ * Paths are absolute; a baseline stamp identifies the exact measurement that
+ * can be reused, including the base commit, workflows and auxiliary inputs. */
+export interface EffectivePlan extends WorkflowsCheckpointView {
+  readonly baseline: { readonly sessionId: string; readonly baseSha: string; readonly planHash: string } | null;
 }
 
-const FILE_NAME = "effective-plan.json";
-
 export function effectivePlanPath(stateDir: string): string {
-  return join(stateDir, FILE_NAME);
+  return join(stateDir, "effective-plan.json");
 }
 
 export function loadEffectivePlan(stateDir: string): EffectivePlan | null {
   const path = effectivePlanPath(stateDir);
   if (!existsSync(path)) return null;
-  try {
-    const parsed = JSON.parse(readFileSync(path, "utf8")) as EffectivePlan;
-    if (
-      parsed === null || typeof parsed !== "object" ||
-      typeof parsed.testEntry !== "string" || typeof parsed.testSourceHash !== "string" ||
-      !Array.isArray(parsed.builds) || typeof parsed.baselineExamHash !== "string"
-    ) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
+  const parsed = PlanFile.safeParse(JSON.parse(readFileSync(path, "utf8")));
+  if (!parsed.success) throw new Error(`invalid effective feedback plan: ${path}`);
+  return parsed.data;
 }
 
 export function saveEffectivePlan(stateDir: string, plan: EffectivePlan): void {
@@ -62,80 +43,47 @@ export function saveEffectivePlan(stateDir: string, plan: EffectivePlan): void {
   writeFileSync(effectivePlanPath(stateDir), `${JSON.stringify(plan, null, 2)}\n`, "utf8");
 }
 
-function sha256SourceFile(path: string): string {
-  return createHash("sha256").update(readFileSync(path, "utf8"), "utf8").digest("hex");
+/** Generated ids and paths identify deliveries, not changes to their content. */
+export function workflowContentHash(view: Pick<WorkflowsCheckpointView, "testSourceHash" | "builds">): string {
+  return createHash("sha256").update(JSON.stringify({
+    test: view.testSourceHash,
+    builds: view.builds.map((build) => ({
+      source: build.sourceHash,
+      materials: [...build.materials].sort((a, b) => a.path.localeCompare(b.path)),
+    })),
+  })).digest("hex");
 }
 
-/** Current hash of the plan's exam source; null when the file went missing. */
-export function examHashOf(plan: EffectivePlan, repoRoot: string): string | null {
-  const exam = join(plan.entryRoot ?? repoRoot, plan.testEntry);
-  if (!existsSync(exam)) return null;
-  return sha256SourceFile(exam);
-}
-
-/** Seed the plan from a verified round-1 checkpoint view. */
-export function planFromCheckpointView(
-  view: WorkflowsCheckpointView,
-  repoRoot: string,
-  baselineExamHash: string,
-): EffectivePlan {
-  const exam = join(view.entryRoot ?? repoRoot, view.testEntry);
+export function planFromCheckpointView(view: WorkflowsCheckpointView, repoRoot: string): EffectivePlan {
+  const entryRoot = resolve(view.entryRoot ?? repoRoot);
   return {
-    entryRoot: view.entryRoot,
-    testEntry: view.testEntry,
-    testSourceHash: view.testSourceHash ?? (existsSync(exam) ? sha256SourceFile(exam) : ""),
-    workflowId: view.workflowId,
-    workflowRevision: view.workflowRevision,
-    builds: view.builds.map((build) => ({ ...build })),
-    baselineExamHash,
+    ...view,
+    entryRoot,
+    testEntry: resolve(entryRoot, view.testEntry),
+    builds: view.builds.map((build) => ({ ...build, entry: resolve(entryRoot, build.entry) })),
+    baseline: null,
   };
 }
 
-/**
- * A delivered build repair replaces its slot. Same mapping rules as the
- * round execution: a single declared build is replaced outright; with
- * several, the failed slot is located by id; null when it cannot be mapped
- * honestly (the caller stops instead of guessing).
- */
+/** Replace only the failed slot; all other delivered repairs remain in force. */
 export function replaceBuild(
   plan: EffectivePlan,
   fixedBuild: { readonly id: string; readonly entry: string },
   failedBuildId: string | null,
-): EffectivePlan | null {
-  const sourceHash = existsSync(fixedBuild.entry) ? sha256SourceFile(fixedBuild.entry) : "";
-  const repaired = { id: fixedBuild.id, entry: fixedBuild.entry, sourceHash, runLocal: true };
-  let builds: EffectivePlan["builds"];
-  if (plan.builds.length === 1) {
-    builds = [repaired];
-  } else {
-    const targetId = failedBuildId ?? fixedBuild.id;
-    const index = plan.builds.findIndex((build) => build.id === targetId);
-    if (index < 0) return null;
-    builds = plan.builds.map((build, position) => (position === index ? repaired : { ...build }));
-  }
-  const exam = join(plan.entryRoot ?? process.cwd(), plan.testEntry);
-  return {
-    ...plan,
-    builds,
-    baselineExamHash: existsSync(exam) ? sha256SourceFile(exam) : plan.baselineExamHash,
-  };
-}
-
-/**
- * An exam repair bumps the exam version: refresh the recorded hash and
- * revision, and RE-STAMP the baseline — this round re-measured both sides
- * under the new exam, so the stored observations are honest for it.
- */
-export function refreshExam(
-  plan: EffectivePlan,
   repoRoot: string,
-  workflowRevision: number,
-): EffectivePlan {
-  const hash = examHashOf(plan, repoRoot);
+): EffectivePlan | null {
+  const index = plan.builds.length === 1 ? 0 : plan.builds.findIndex((build) => build.id === failedBuildId);
+  if (index < 0) return null;
+  const entry = resolve(repoRoot, fixedBuild.entry);
+  const repaired = {
+    id: fixedBuild.id, entry,
+    sourceHash: createHash("sha256").update(readFileSync(entry, "utf8")).digest("hex"),
+    runLocal: true,
+    materials: readVerificationMaterials(entry).map(({ path, sha256 }) => ({ path, sha256 })),
+  };
   return {
     ...plan,
-    workflowRevision: workflowRevision > 0 ? workflowRevision : plan.workflowRevision,
-    testSourceHash: hash ?? plan.testSourceHash,
-    baselineExamHash: hash ?? plan.baselineExamHash,
+    builds: plan.builds.map((build, position) => position === index ? repaired : build),
+    baseline: null,
   };
 }

@@ -11,6 +11,7 @@ import {
   type WorkflowSessionAgentOptions,
   type WorkflowSessionResult,
 } from "../src/agents/workflow-session.js";
+import { LocalDependencyRegistry } from "../src/agents/dep-registry.js";
 import { mcpText, withMcpClient } from "./helpers/mcp-client.js";
 import { analysisReport } from "./helpers/verification-analysis.js";
 import { verificationPlanningPrompt } from "../src/agents/verification-planning.js";
@@ -300,6 +301,42 @@ describe("runWorkflowSession", () => {
     expect(o.systemPrompt).toBeUndefined(); // the stored conversation carries its own
     expect(o.prompt).toContain("修复考卷解析");
     expect(o.prompt).toContain("续写提醒");
+  });
+
+  test("a continued writer can inspect and declare the original run-local build through its MCP tools", async () => {
+    const repoDir = tempRepo();
+    const registry = new LocalDependencyRegistry({
+      workspaceRoot: repoDir, sessionRoot: repoDir, sessionId: "first-round",
+      host: minimalHost(), project: minimalProject(repoDir),
+    });
+    const generated = await registry.generate({
+      name: "original-build", description: "original recipe",
+      content: 'export const workflowKind = "workflow-driven";\nexport default async () => {};\n',
+    });
+    const original = await registry.resolveBuildEntry(generated.workflowId);
+    if (original === null) throw new Error("missing fixture build");
+    const testEntry = join(repoDir, ".refactor", "test.ts");
+    const result = await runWorkflowSession({
+      repoDir, sessionRoot: repoDir, sessionId: "repair-round", task: "repair test script",
+      testEntry, host: minimalHost(), project: minimalProject(repoDir),
+      resume: { dialogueId: "original-dialogue", feedback: "fix script execution" },
+      adoptBuilds: [{ id: generated.workflowId, entry: original.entry }],
+      runAgentFn: async (options) => {
+        await withMcpClient(options.mcpServers["dep-registry"] as McpSdkServerConfigWithInstance, async (client) => {
+          const inspected = await client.callTool({ name: "inspectWorkflow", arguments: { kind: "build", id: generated.workflowId } });
+          expect(inspected.isError).not.toBe(true);
+          expect(mcpText(inspected)).toContain(generated.workflowId);
+          const declared = await client.callTool({ name: "declareDependency", arguments: { buildWorkflowIds: [generated.workflowId] } });
+          expect(declared.isError).not.toBe(true);
+          const analysis = await client.callTool({ name: "submitVerificationAnalysis", arguments: analysisReport() });
+          expect(analysis.isError).not.toBe(true);
+        });
+        writeFileSync(testEntry, 'export const workflowKind = "test-workflow-driven";\n');
+        return { result: "fixed", isError: false, timedOut: false };
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(result.declaredBuilds).toEqual([generated.workflowId]);
   });
 
   test("a resume answered under a different conversation id fails loudly", async () => {

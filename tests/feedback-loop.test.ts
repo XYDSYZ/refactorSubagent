@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { freshFeedbackState, loadFeedbackState, saveFeedbackState } from "../src/runtime/feedback/state.js";
 import { parseCliArgs } from "../src/cli/args.js";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -14,7 +15,7 @@ import {
   presetWorkflowsStage,
 } from "../src/runtime/stage-presets.js";
 import { loadReusableWorkflowsStage } from "../src/runtime/stage-resume.js";
-import { composeRefactorFeedback, mergeRepairedBuilds } from "../src/runtime/feedback/repair.js";
+import { composeRefactorFeedback } from "../src/runtime/feedback/repair.js";
 import { runFeedbackLoop, routerInputOf, type FeedbackLoopConfig, type RepairRoundContext } from "../src/runtime/feedback/coordinator.js";
 
 /**
@@ -581,6 +582,45 @@ describe("runFeedbackLoop", () => {
     expect(context.feedback).toContain("脚本错误");
   });
 
+  test("a test repair consumes its budget before an interrupted session begins", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rfr-test-budget-"));
+    try {
+      const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+      const config = makeConfig([fakeResult({
+        state: "ABORTED", workflowsDialogue: "author", branch: "candidate",
+        failure: { category: "test", component: "test-workflow:baseline", reason: "TypeError: ctx.fs.read is not a function" },
+      })], captured, 3, stateDir);
+      await expect(runFeedbackLoop({
+        ...config,
+        runRepairRound: async () => {
+          expect(loadFeedbackState(stateDir)?.budgetUsed).toBe(1);
+          throw new Error("simulated hard interruption");
+        },
+      })).rejects.toThrow("simulated hard interruption");
+      expect(loadFeedbackState(stateDir)?.budgetUsed).toBe(1);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
+  test("changing the configured total on resume retains attempts already spent", async () => {
+    const stateDir = mkdtempSync(join(tmpdir(), "rfr-resume-budget-"));
+    try {
+      const prior = { ...freshFeedbackState(3), budgetUsed: 2 };
+      saveFeedbackState(stateDir, prior);
+      const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
+      const outcome = await runFeedbackLoop(makeConfig([fakeResult({
+        state: "REJECTED", dialogueId: "author", branch: "candidate", mismatches: MISMATCHES,
+      })], captured, 1, stateDir));
+      expect(outcome.stoppedBecause).toBe("budget-exhausted");
+      expect(captured.repairContexts).toHaveLength(0);
+      expect(loadFeedbackState(stateDir)?.budgetUsed).toBe(2);
+      expect(loadFeedbackState(stateDir)?.budgetTotal).toBe(1);
+    } finally {
+      rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+
   test("environment failure routes to an immediate stop", async () => {
     const captured: Captured = { rounds: [], repairContexts: [], notifications: [], pinnedCalls: 0 };
     const outcome = await runFeedbackLoop(
@@ -602,38 +642,6 @@ describe("runFeedbackLoop", () => {
     expect(outcome.stoppedBecause).toBe("missing-patch");
     expect(captured.repairContexts).toHaveLength(0);
     expect(captured.notifications.join("\n")).toContain("考卷");
-  });
-});
-
-describe("mergeRepairedBuilds", () => {
-  const SINGLE = [{ id: "b1", entry: "wf/build/b1.ts", runLocal: false }];
-  const SET = [
-    { id: "b1", entry: "wf/build/b1.ts", runLocal: false },
-    { id: "b2", entry: "wf/build/b2.ts", runLocal: true },
-  ];
-  const FIXED = { id: "b2.r2", entry: "D:\\fix\\b2.r2.ts" };
-
-  test("a single declared build is replaced outright", () => {
-    expect(mergeRepairedBuilds(SINGLE, FIXED, null)).toEqual([
-      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
-    ]);
-  });
-
-  test("multi-build sets replace the attributed slot and keep the rest verbatim", () => {
-    // Shrinking the set would verify a different contract than round 1.
-    expect(mergeRepairedBuilds(SET, FIXED, "b2")).toEqual([
-      { id: "b1", entry: "wf/build/b1.ts", runLocal: false },
-      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
-    ]);
-    expect(mergeRepairedBuilds(SET, FIXED, "b1")).toEqual([
-      { id: "b2.r2", entry: FIXED.entry, runLocal: true },
-      { id: "b2", entry: "wf/build/b2.ts", runLocal: true },
-    ]);
-  });
-
-  test("an unmappable repair returns null instead of guessing", () => {
-    expect(mergeRepairedBuilds(SET, FIXED, "ghost")).toBeNull();
-    expect(mergeRepairedBuilds([], FIXED, "b1")).toBeNull();
   });
 });
 

@@ -138,8 +138,8 @@ export interface DialogueHandles {
 }
 
 /**
- * feedback-state.json — the run-level sidecar (sibling of
- * stage-checkpoints.json). Terminal verdicts stay immutable; this file only
+ * feedback-state.json — the run-level state under
+ * .refactor/feedback/<root-session>/. Terminal verdicts stay immutable; this file only
  * coordinates the loop ABOVE them: how much budget is spent, which
  * conversations continue, what each round recorded.
  */

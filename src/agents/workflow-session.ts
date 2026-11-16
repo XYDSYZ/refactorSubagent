@@ -37,6 +37,8 @@ export interface WorkflowSessionOptions {
   /** Absolute session root where run-local artifacts live. */
   readonly sessionRoot: string;
   readonly sessionId: string;
+  /** Current builds inherited from earlier feedback rounds. */
+  readonly adoptBuilds?: readonly { readonly id: string; readonly entry: string }[];
   /** Natural-language task describing what behavior to verify. */
   readonly task: string;
   /** Absolute path where the produced TestWorkflow source must be written. */
@@ -240,6 +242,7 @@ export async function runWorkflowSession(
     sessionId: options.sessionId,
     host: options.host,
     project: options.project,
+    adoptBuilds: options.adoptBuilds,
   });
   const verificationAnalysis = new VerificationAnalysisStore(
     join(repoDir, ".refactor", "runs", options.sessionId, "workflows", "verification-analysis.json"),

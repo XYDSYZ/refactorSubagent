@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { workflowContentHash } from "./effective-plan.js";
 import type { StageFlowResult, WorkflowsStage } from "../stage-flow.js";
 import type { ReusedExpectation } from "../workflow-pipeline.js";
 import { classifyFailureOwner, routeFailure, type RouterInput } from "./router.js";
@@ -14,7 +15,7 @@ import type { FeedbackState } from "./types.js";
  * three repair lanes:
  *   refactor — CONTINUE the original refactor dialogue with the failure
  *              evidence, rebuild from the measured candidate branch, re-verify
- *              under the pinned round-1 exam (baseline observations reusable).
+ *              under the current pinned exam (baseline observations reusable).
  *   test     — CONTINUE the original authoring dialogue when the exam itself
  *              errored as a script; both sides re-run under the NEW exam.
  *   build    — a dedicated build-writer session repairs the failed build
@@ -35,22 +36,29 @@ export interface FeedbackLoopConfig {
   readonly notify: (message: string) => void;
   /** Round 1: the normal full run (AI workflows, AI refactor, verify). */
   readonly runInitial: () => Promise<StageFlowResult>;
-  /** Load round 1's pinned exam so refactor/build repair rounds run the
+  /** Load the current pinned exam so refactor/build repair rounds run the
    *  identical test workflow (null when its checkpoint no longer verifies). */
   readonly loadPinnedWorkflows: () => WorkflowsStage | null;
-  /** Absolute path of the round-1 exam entry (test-repair lane writes the
+  /** Absolute path of the current exam entry (test-repair lane writes the
    *  fixed exam to the SAME path). Null when the checkpoint is unavailable. */
   readonly locateExamEntry: () => string | null;
   /** Compose the build-repair brief (needs the failed build's specifics from
-   *  the round-1 checkpoint). Null = checkpoint unavailable, stop honestly. */
+   *  the current checkpoint). Null = checkpoint unavailable, stop honestly. */
   readonly composeBuildBrief: (evidence: RepairEvidence, round: number) => string | null;
   /** Run the dedicated build-repair session; null = it produced nothing. */
   readonly runBuildRepair: (brief: string, round: number) => Promise<{ id: string; entry: string } | null>;
   /** Load a previous round's measured baseline observations (refactor lane
    *  reuse). Null = unavailable, the round re-measures the baseline side. */
-  readonly loadBaselineObservations: (previousSessionId: string) => readonly ReusedExpectation[] | null;
+  readonly loadBaselineObservations: (previousSessionId: string, baseSha: string) => readonly ReusedExpectation[] | null;
   /** Durable state location (feedback-state.json); optional. */
   readonly stateDir?: string;
+  /** State already loaded and enriched by the caller when resuming a run. */
+  readonly initialState?: FeedbackState;
+  /** Persist the run lineage before execution, and the measured plan afterwards. */
+  readonly onRoundStarted?: (sessionId: string) => void;
+  readonly onRoundCompleted?: (sessionId: string, result: StageFlowResult) => void;
+  /** Current builds available to the continued test-writer's MCP tools. */
+  readonly loadCurrentBuilds?: () => readonly { readonly id: string; readonly entry: string }[];
   /** Run one repair round with the composed lane context. */
   readonly runRepairRound: (round: number, context: RepairRoundContext) => Promise<StageFlowResult>;
   /**
@@ -77,6 +85,7 @@ export type RepairRoundContext =
     }
   | {
       lane: "test";
+      adoptBuilds: readonly { readonly id: string; readonly entry: string }[];
       dialogueId: string;
       testEntry: string;
       feedback: string;
@@ -165,19 +174,16 @@ export function routerInputOf(result: StageFlowResult): RouterInput {
   };
 }
 
-/** Cheap identity of what a round produced. Lane-aware by construction:
- *  a refactor repair moves the candidate commit, a build repair swaps a
- *  declared build (id/entry), a test repair bumps the exam revision — the
- *  previous commit-only hash read every build/test repair as "no change". */
+/** Content identity stays stable when a repair re-registers identical sources. */
 function artifactHashOf(result: StageFlowResult): string | null {
-  const parts = [
-    result.patch?.commit_sha ?? "no-commit",
-    "builds:" + (result.declared?.declaredSet.builds.map((build) => build.id).join("|") ?? "none"),
-    "exam:" + (result.declared !== null
-      ? `${result.declared.declaredSet.test_workflow_id}:${String(result.declared.declaredSet.test_workflow_revision)}`
-      : "none"),
-  ];
-  return parts.join("|");
+  if (result.declared === null) return result.patch?.commit_sha ?? null;
+  const hash = workflowContentHash({
+    testSourceHash: result.declared.testResolution.sourceHash,
+    builds: result.declared.declaredSet.builds.map((build) => ({
+      ...build, sourceHash: build.source_hash, runLocal: build.run_local, materials: build.materials ?? [],
+    })),
+  });
+  return `${result.patch?.commit_sha ?? "no-commit"}:${hash}`;
 }
 
 /** Unbiased digest of the raw failure text so "build A broke" and "build B
@@ -198,31 +204,37 @@ function failureSignatureOf(result: StageFlowResult): string | null {
   const input = routerInputOf(result);
   const decision = routeFailure(input);
   const names = input.mismatches.map((mismatch) => mismatch.name).sort().join("|");
-  const reason = input.failure === null ? "" : reasonDigest(input.failure.reason);
-  return `${decision.kind}:${input.side ?? "none"}:${input.buildId ?? "none"}:${reason}:${names}`;
+  let reason = input.failure?.reason ?? "";
+  let buildSlot = input.buildId ?? "none";
+  for (const [index, build] of (result.declared?.declaredSet.builds ?? []).entries()) {
+    // A new run-local id must not turn the same error into a new failure.
+    reason = reason.replaceAll(build.id, `<build-${String(index)}>`);
+    if (input.buildId === build.id) buildSlot = String(index);
+  }
+  return `${decision.kind}:${input.side ?? "none"}:${buildSlot}:${reasonDigest(reason)}:${names}`;
 }
 
 export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<FeedbackLoopOutcome> {
   const rounds: FeedbackRoundOutcome[] = [];
   // Durable budget: a re-launched loop for the same run keeps what it spent.
-  let persisted: FeedbackState | null = config.stateDir !== undefined
-    ? loadFeedbackState(config.stateDir)
-    : null;
-  if (persisted !== null && persisted.budgetTotal !== config.budget) persisted = null;
-  let budgetUsed = persisted?.budgetUsed ?? 0;
+  let persisted = config.initialState
+    ?? (config.stateDir !== undefined ? loadFeedbackState(config.stateDir) : null)
+    ?? freshFeedbackState(config.budget);
+  // Changing the total never erases attempts already spent.
+  persisted = { ...persisted, budgetTotal: config.budget };
+  let budgetUsed = persisted.budgetUsed;
+  const firstRound = (persisted.rounds.at(-1)?.round ?? 0) + 1;
   /** Budget snapshot written IMMEDIATELY when a unit is consumed — an
    *  interrupted repair (crash, kill, model-session halt mid-round) must not
    *  look like unspent budget on the next launch. */
   const persistBudget = (): void => {
-    if (config.stateDir === undefined) return;
-    const base = persisted ?? freshFeedbackState(config.budget);
+    const base = persisted;
     base.budgetUsed = budgetUsed;
     persisted = base;
-    saveFeedbackState(config.stateDir, base);
+    if (config.stateDir !== undefined) saveFeedbackState(config.stateDir, base);
   };
-  const persist = (record: FeedbackRoundOutcome, result: StageFlowResult): void => {
-    if (config.stateDir === undefined) return;
-    const base = persisted ?? freshFeedbackState(config.budget);
+  const persist = (record: FeedbackRoundOutcome, result: StageFlowResult, lane: RepairRoundContext["lane"] | null): void => {
+    const base = persisted;
     base.budgetUsed = budgetUsed;
     if (result.refactorDialogueId !== null) base.dialogues.refactor = result.refactorDialogueId;
     if (result.workflowsDialogueId !== null) base.dialogues.testWriter = result.workflowsDialogueId;
@@ -234,14 +246,14 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         sessionId: record.sessionId,
         outcome: record.state === "ACCEPTED" || record.state === "REJECTED" ? record.state : "ABORTED",
         decision: record.decision,
-        repair: null,
-        budgeted: record.round > 1,
+        repair: lane,
+        budgeted: lane !== null,
         artifactHash: record.artifactHash,
         failureSignature: record.failureSignature,
       },
     ];
     persisted = base;
-    saveFeedbackState(config.stateDir, base);
+    if (config.stateDir !== undefined) saveFeedbackState(config.stateDir, base);
   };
 
   const evaluate = (round: number, sessionId: string, result: StageFlowResult): FeedbackRoundOutcome => ({
@@ -254,11 +266,13 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
   });
 
   // ---- Round 1: the initial execution (not budgeted) ----
-  config.notify("第 1 轮执行开始：完整流水线（出卷、施工、验证）。");
+  config.notify(`第 ${String(firstRound)} 轮执行开始。`);
+  config.onRoundStarted?.(config.sessionIdFor(firstRound));
   let result = await config.runInitial();
-  let record = evaluate(1, config.sessionIdFor(1), result);
+  config.onRoundCompleted?.(config.sessionIdFor(firstRound), result);
+  let record = evaluate(firstRound, config.sessionIdFor(firstRound), result);
   rounds.push(record);
-  persist(record, result);
+  persist(record, result, null);
 
   while (true) {
     if (result.state === "ACCEPTED") {
@@ -300,15 +314,15 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       return { result, rounds, stoppedBecause: "no-progress", stopDetail: null };
     }
 
-    const round = rounds.length + 1;
+    const round = firstRound + rounds.length;
     const sessionId = config.sessionIdFor(round);
-    let context: RepairRoundContext | { error: "missing-dialogue" | "missing-patch" | "missing-input" | "repair-failed"; detail: string };
+    let context: RepairRoundContext;
 
     if (decision.kind === "repair-refactor") {
       // Durable dialogue handles: a lane that did not run the refactor AI
       // (e.g. the previous round was a build repair) keeps the id from the
       // last round that did, so lane SWITCHES continue the original chat.
-      const dialogueId = result.refactorDialogueId ?? persisted?.dialogues.refactor ?? null;
+      const dialogueId = result.refactorDialogueId ?? persisted.dialogues.refactor ?? null;
       const patch = result.patch;
       if (dialogueId === null) {
         config.notify("本轮没有可续写的重构对话句柄（会话未上报对话编号）；无法续写，停止。");
@@ -320,7 +334,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       }
       const pinnedWorkflows = config.loadPinnedWorkflows();
       if (pinnedWorkflows === null) {
-        config.notify("无法加载第 1 轮的考卷检查点——换新考卷会破坏轮间可比性，我停止了循环。");
+        config.notify("无法加载当前有效的验证方案——换新考卷会破坏轮间可比性，我停止了循环。");
         return { result, rounds, stoppedBecause: "missing-patch", stopDetail: "pinned-exam-unavailable" };
       }
       // Baseline reuse: every refactor-lane trigger (candidate build/crash,
@@ -328,7 +342,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       // pinned exam in the previous round, and repair rounds never move the
       // repo HEAD — so the previous baseline observations remain valid.
       // The loader receives the previous round's REAL session id.
-      const reusedBaseline = config.loadBaselineObservations(rounds.at(-1)!.sessionId);
+      const reusedBaseline = config.loadBaselineObservations(rounds.at(-1)!.sessionId, patch.base_sha);
       const feedback = composeRefactorFeedback(decision.trigger, decision.evidence, {
         candidateBranch: patch.branch,
         round,
@@ -347,12 +361,12 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       persistBudget();
       config.notify(
         `第 ${String(round)} 轮反馈修复开始：我向原重构对话追加了失败证据（${decision.trigger}），` +
-          `考卷沿用第 1 轮版本，从候选分支 ${patch.branch} 继续施工` +
+          `沿用当前验证方案，从候选分支 ${patch.branch} 继续施工` +
           (reusedBaseline !== null ? "，基线观测按守卫复用" : "") +
           `。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
       );
     } else if (decision.kind === "repair-test") {
-      const dialogueId = result.workflowsDialogueId ?? persisted?.dialogues.testWriter ?? null;
+      const dialogueId = result.workflowsDialogueId ?? persisted.dialogues.testWriter ?? null;
       const testEntry = config.locateExamEntry();
       const patch = result.patch;
       if (dialogueId === null || testEntry === null) {
@@ -366,6 +380,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       const feedback = composeTestFeedback(decision.evidence, { round, testEntry });
       context = {
         lane: "test",
+        adoptBuilds: config.loadCurrentBuilds?.() ?? [],
         dialogueId,
         testEntry,
         feedback,
@@ -374,6 +389,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         sessionId,
       };
       budgetUsed += 1;
+      persistBudget();
       config.notify(
         `第 ${String(round)} 轮反馈修复开始：考卷脚本自身出错，我向原出题对话追加了错误证据；` +
           `两侧将在修复后的同一版考卷下重新验证。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
@@ -403,7 +419,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       }
       const pinnedWorkflows = config.loadPinnedWorkflows();
       if (pinnedWorkflows === null) {
-        config.notify("无法加载第 1 轮的考卷检查点；构建修复后无法保持考卷一致，停止。");
+        config.notify("无法加载当前有效的验证方案；构建修复后无法保持考卷一致，停止。");
         return { result, rounds, stoppedBecause: "missing-patch", stopDetail: "pinned-exam-unavailable" };
       }
       context = {
@@ -420,10 +436,12 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       );
     }
 
+    config.onRoundStarted?.(sessionId);
     result = await config.runRepairRound(round, context);
+    config.onRoundCompleted?.(sessionId, result);
     record = evaluate(round, sessionId, result);
     rounds.push(record);
-    persist(record, result);
+    persist(record, result, context.lane);
   }
 }
 
