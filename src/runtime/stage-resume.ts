@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { z } from "zod";
@@ -134,6 +135,46 @@ const WorkflowsCheckpointData = z.object({
   ),
 });
 
+function sha256SourceFile(path: string): string {
+  return createHash("sha256").update(readFileSync(path, "utf8"), "utf8").digest("hex");
+}
+
+type WorkflowsCheckpointParsed = z.infer<typeof WorkflowsCheckpointData>;
+
+/**
+ * Existence AND source-hash verification for a parsed workflows checkpoint:
+ * reuse is only honest when every pinned source on disk is byte-identical to
+ * what the checkpoint recorded (an edited exam or build must never be pinned
+ * as "the same workflow"). Returns null when everything verifies, otherwise
+ * the human-readable reason it cannot be reused.
+ */
+export function checkpointReuseBlocker(
+  entryRoot: string,
+  parsed: WorkflowsCheckpointParsed,
+): string | null {
+  const testPath = join(entryRoot, parsed.test_entry);
+  if (!existsSync(testPath)) {
+    return `test workflow source missing on disk (${parsed.test_entry})`;
+  }
+  if (parsed.test_source_hash === undefined) {
+    return "test workflow source hash not recorded — cannot verify the exam is unchanged";
+  }
+  const actualTestHash = sha256SourceFile(testPath);
+  if (actualTestHash !== parsed.test_source_hash) {
+    return "test workflow source changed since the checkpoint (hash mismatch)";
+  }
+  for (const build of parsed.builds) {
+    const buildPath = join(entryRoot, build.entry);
+    if (!existsSync(buildPath)) {
+      return `build ${build.id} source missing on disk (${build.entry})`;
+    }
+    if (sha256SourceFile(buildPath) !== build.source_hash) {
+      return `build ${build.id} source changed since the checkpoint (hash mismatch)`;
+    }
+  }
+  return null;
+}
+
 const RefactorCheckpointData = z.object({
   branch: z.string().min(1),
   base_sha: z.string().min(1),
@@ -218,8 +259,7 @@ export function loadReusableWorkflowsStage(
   const parsed = WorkflowsCheckpointData.safeParse(entry.data);
   if (!parsed.success) return null;
   const entryRoot = parsed.data.entry_root ?? repoPath;
-  const sources = [parsed.data.test_entry, ...parsed.data.builds.map((b) => b.entry)];
-  if (sources.some((source) => !existsSync(join(entryRoot, source)))) return null;
+  if (checkpointReuseBlocker(entryRoot, parsed.data) !== null) return null;
   return presetWorkflowsStage({
     builds: parsed.data.builds.map((b) => ({ id: b.id, entry: b.entry, runLocal: b.run_local })),
     testEntry: parsed.data.test_entry,
@@ -261,11 +301,9 @@ export function planStageResume(req: StageResumeRequest): StageResumePlan {
       // Entries are relative to the entry root the source run resolved them
       // against (the repository when the checkpoint predates entry_root).
       const entryRoot = parsed.data.entry_root ?? req.repoPath;
-      const missing = [parsed.data.test_entry, ...parsed.data.builds.map((b) => b.entry)].find(
-        (entry) => !existsSync(join(entryRoot, entry)),
-      );
-      if (missing !== undefined) {
-        notes.push(`workflows: source missing on disk (${missing}) — the stage will re-run`);
+      const blocker = checkpointReuseBlocker(entryRoot, parsed.data);
+      if (blocker !== null) {
+        notes.push(`workflows: ${blocker} — the stage will re-run`);
       } else {
         workflows = {
           testEntry: parsed.data.test_entry,
