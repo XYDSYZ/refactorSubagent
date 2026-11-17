@@ -11,7 +11,7 @@
 refactorSubagent/
 ├─ src/                     harness 本体（状态机、阶段、能力代理、配置）
 ├─ shared/                  宿主与测试集共用的进程生命周期管理
-├─ scripts/cli.ts           命令行入口（run / preflight / workflow / limits / config）
+├─ scripts/cli.ts           命令行入口（run / tests / preflight / workflow / limits / config）
 ├─ tests/                   harness 单元与离线 e2e 测试（bun test）
 ├─ docs/                    设计文档（stage-flow、limits、roadmap…）
 │  └─ testset/              测试集文档（见下）
@@ -35,13 +35,193 @@ bun run scripts/cli.ts run <repo> --task "<重构任务>" --session s1
 bun run scripts/cli.ts limits <repo>       # 当前生效的超时/资源阈值及其来源
 ```
 
+## 终端工作台与启动配置
+
+交互终端默认使用 **OpenTUI**。测试准备、测试审阅和普通 `run` 共用一套工作台：
+顶部切换分区，左侧选择项目，右侧独立滚动详情，底部显示可聚焦的操作按钮与当前状态。
+支持键盘、鼠标、终端缩放和多行文本输入，Windows 与 Linux 使用同一份界面代码。
+OpenTUI 的原生渲染层使用 Zig；使用本项目时由 Bun 安装对应平台的预编译包，无需另装 Zig。
+项目 CI 使用 Bun 1.3.14；请先执行 `bun install`，不要在 Windows 和 Linux 间共用 `node_modules`。
+
+```bash
+# 无参数：选择全流程重构、准备测试或打开已有方案
+bun scripts/cli.ts
+
+# 缺少任务时进入配置向导；完整参数则直接开始
+bun scripts/cli.ts run <repo>
+bun scripts/cli.ts run <repo> --task "提取重复参数检查，保持行为不变"
+
+# 即使已经有任务，也先编辑完整设置
+bun scripts/cli.ts run <repo> --task "提取重复参数检查" --configure
+
+# 强制普通文字；JSON、CI、重定向场景默认也使用普通模式
+bun scripts/cli.ts run <repo> --task "..." --ui plain
+```
+
+配置向导可编辑仓库与任务、测试来源（AI、指定脚本或已保存方案）、候选分支来源、
+重构来源（AI、补丁或已有候选）、多个构建、模型、全部现有限制、反馈次数、恢复会话、
+结果/工作目录、注入文件和额外配置文件。准备测试与审阅只展示各自使用的设置。
+恢复运行时保留原会话的流程输入，不提供替换验证方案的选项。
+
+修改默认仅对本次有效。**保存项目默认**会先展示 `.refactor/pipeline.json` 和 `limits.json` 的真实差异，
+确认后写入；不保存当前任务、会话名称或反馈次数。**导出启动命令**会在选定目录生成独立的配置快照与
+`command.txt`，命令包含本次输入及配置路径，可从当前系统的终端复用。
+
+| 操作 | 方法 |
+|---|---|
+| 切换分区 | `1`–`9`；也可聚焦顶部导航后使用方向键 |
+| 切换焦点 | `Tab` / `Shift+Tab`，底部显示当前焦点 |
+| 选择、打开项目 | 列表中使用方向键，`Enter` 打开详情或编辑设置 |
+| 滚动详情 | 聚焦详情后使用方向键、PageUp/PageDown 或鼠标滚轮 |
+| 跟随最新输出 | “跟随最新”按钮；详情内按 End |
+| 输入多行内容 | `Enter` 换行；`Tab` 移动到“提交”或“取消”按钮 |
+| 返回、退出 | `Esc` 关闭弹窗或返回列表；`Q` 退出，运行中先确认取消 |
+| 直接取消 | Ctrl+C，等待当前进程回收并恢复终端 |
+
+80 列及以上显示左右分栏；60–79 列先显示列表，Enter 打开详情、Esc 返回。
+窗口低于 60 列或 18 行时提示调整大小。`--ui tui` 要求交互 stdin/stderr，不能与 JSON、
+`--no-interactive` 或 `--progress plain/off` 同时使用；自动模式初始化失败会退回文字模式。
+
+全流程工作台包含：运行概览、AI 会话、验证方案、构建与测试、行为对比、文件差异、反馈历史和运行设置。
+可以按会话查看 AI 回复和工具结果，按轮次、原版/候选版、构建和命令查看执行状态、输出及证据。
+行为比较可选中单个检查项查看两侧值；文件差异使用 Git 的真实行级 diff。
+结束后停留在结果页，退出后 stdout 留下简短结果和完整报告路径。执行顺序、反馈规则与退出码保持一致。
+
+## 先写测试，再决定是否重构
+
+可以先准备一套测试，在原版上试跑并查看具体场景，满意后再开始重构。验证范围与重构需求分开输入：
+前者描述要保护的模块、行为和边界条件，后者描述如何改代码。
+
+```bash
+# 交互终端中自动打开工作台；省略 --scope 时进入配置向导
+bun scripts/cli.ts tests prepare <repo> --scope "保护字符串复制函数的空输入、截断和容量边界"
+
+# 再次打开保存的某个版本，可继续修改和试跑
+bun scripts/cli.ts tests review <repo> --from <repo>/.refactorsa/test-plans/<id>/r1
+
+# 在新运行中复用测试，使用现有完整流程与反馈机制
+bun scripts/cli.ts run <repo> --task "合并重复的容量检查，保持行为不变" --tests <方案目录>
+
+# 非交互方式生成、试跑并保存；stdout 是单个 JSON，进度写入 stderr
+bun scripts/cli.ts tests prepare <repo> --scope "保护解析器的错误处理" --ui plain --format json --out <保存父目录> > preparation.json 2> preparation.log
+
+# 只查看保存结果，不调用 AI、不执行构建
+bun scripts/cli.ts tests review <repo> --from <方案目录> --ui plain --verbosity summary
+```
+
+审阅界面包含方案概览、测试场景、原版试跑、文件与修改、AI 会话、构建与测试、历史与设置。
+选择某个场景可查看目的、输入、源码依据、关联检查项和实际观测值；辅助 C 文件单独展示，
+已有文件的修改使用行级 diff。未在场景说明中关联的实际检查项会单独标出。
+
+底部按钮提供“修改意见”“修复执行错误”“重新试跑”“保存方案”“继续重构”和“退出”。
+修改意见使用多行编辑器；提交后继续原测试对话，再从固定原版提交试跑。
+执行失败时可明确要求修复；构建错误交给构建角色，测试或交付错误交给测试角色。
+只有方案完整且原版试跑通过后才能继续重构。继续时单独输入重构需求，再确认全流程设置。
+普通退出不自动保存，也不启动重构；运行中取消会等待模型与进程回收，并保留已有材料和证据。
+
+测试编写阶段只读代码、交付脚本与辅助材料；编译和执行由宿主完成。
+准备流程创建固定提交的原版工作目录，每次试跑从干净副本开始，避免残留产物或已删除的辅助文件影响结果；不创建候选分支，也不生成 `ACCEPTED`/`REJECTED`。
+准备期间的失败先交给人查看，修复由上述操作显式触发，不自动消耗正式运行的反馈次数。
+试跑通过表示这套脚本在记录的原版上成功执行；覆盖是否满足需求可结合场景、辅助代码和实际观测审阅。
+
+默认保存到目标仓库 `.refactorsa/test-plans/<id>/r1`、`r2`……，每次保存创建新版本。
+`--out` 指定保存父目录，程序在其中创建 `r<N>`。每个版本包含 `plan.json`、全部测试与构建脚本、
+注册的辅助代码/mock/数据、方案与场景说明、试跑证据和日志；编译产物不打包。
+整个版本目录可以复制后复用，加载时校验文件清单和哈希；源目录或准备工作目录删除后仍可使用。
+准备现场另保存在 `--session-root` 下的 `.refactor/test-preparations/<session>/`，正常退出会移除其原版 worktree。
+
+本机的 AI 对话指针独立放在目标仓库 `.refactor/test-plan-dialogues/`，不放进可移植方案。
+原对话仍存在时继续该对话；移到另一台机器或对话已删除时，修改会建立新对话并提供当前方案和意见。
+正式运行使用本次运行的脚本副本，重新执行两侧构建与测试；后续修复沿用现有反馈规则，不覆盖已保存版本。
+`--tests` 替换测试准备阶段，不能与显式配置的其他 workflow 输入或 `--resume` 同时使用；
+恢复一次已经开始的正式运行时，直接使用其 `--resume` 检查点即可。
+
+`tests` 命令还支持 `--session`、`--session-root`、`--verbosity detailed|summary`、`--no-color` 和 `--no-interactive`。
+`--ui auto` 只在 stdin/stderr 都是交互终端、非 CI、非 JSON、且终端支持控制序列时启用 TUI；
+`--ui plain` 始终使用普通文本，`--ui tui` 在条件不满足时报错。
+非交互 `prepare` 必须提供非空 `--scope`，交付和试跑结束后保存退出；`review --ui plain` 只读取已有方案。
+默认详细模式显示 AI 正常文字和命令输出，摘要模式省略正文与正常输出。
+退出码为 0 表示原版试跑通过或正常查看未运行草稿，1 表示交付/执行失败，2 表示参数错误，130 表示取消。
+
+无需调用模型的离线演示会执行一个微型 Git 项目的构建和测试，并保存界面回放与示例方案：
+
+```bash
+bun scripts/replay-test-preparation.ts --out runs/test-preparation-demo
+# 输出真实 OpenTUI 帧 review.txt、run.detailed.txt、run.summary.txt，以及报告和 test-plan/r1
+```
+
+### 直接体验：一个没有现成测试的小型 C 库
+
+这个示例用来体验“先审阅测试，再决定是否重构”。项目只有 `text_copy` 字符串复制函数，
+CMake 只构建静态库，没有现成的测试或可执行程序。它没有文件、网络等外部依赖，
+适合编写小型 C 辅助程序直接调用真实实现。
+
+在工具仓库根目录执行以下命令。准备脚本需要 Bun、Git，以及 PATH 中的 GCC、Clang 或 `cc`，
+会创建并提交一个独立的示例 Git 仓库，使用真实编译器构建和试跑；**准备脚本不调用模型**。
+
+```powershell
+bun scripts/setup-test-preparation-demo.ts
+```
+
+默认目录为 `runs/test-preparation-playground/`：`repo/` 是目标项目，`plans/r1/` 是已经试跑通过的
+预置测试方案，`sessions/` 保留执行证据，`experience.json` 记录路径、验证范围、重构需求和完整命令。
+预置方案由仓库提供，便于立即体验界面；接下来的“从零编写”才由 AI 决定测试方式并编写代码。
+重复准备不会覆盖已有目录；需要新的环境时使用 `--out runs/test-preparation-playground-2`。
+
+在 Windows Terminal / PowerShell 等交互终端中打开审阅界面，保持输入和输出连接终端：
+
+```powershell
+bun scripts/cli.ts tests review ./runs/test-preparation-playground/repo --from ./runs/test-preparation-playground/plans/r1 --ui tui
+```
+
+建议按这个顺序体验：
+
+1. 按 `1` 看方案：为什么选择独立辅助程序、使用了什么依赖、有哪些覆盖缺口。
+2. 按 `2` 看十个具体场景：正常复制、恰好容纳、截断、容量为一、空字符串、零容量查询、空串零容量、空源指针、空目标指针和长字符串截断。
+3. 按 `3` 看真实试跑结果。十个检查项分别记录状态、复制长度、原长度、输出、终止符、守卫字节及是否完全未写入。
+4. 按 `4` 后在左侧选择具体文件；右侧显示构建/测试脚本或辅助 C 源码，Tab 聚焦详情后可滚动。
+5. 用 Tab 聚焦“重新试跑”并按 Enter，查看实际构建；再选择“保存方案”，最后按 Q 退出。这些操作不调用模型。
+6. 想修改测试时选择“修改意见”，例如输入：`补充容量为 2 的截断场景，以及无效源指针时目标缓冲区所有字节保持不变的独立检查，并同步更新场景说明。` 这会调用 AI，完成后自动试跑，可再次审阅和保存。预置示例没有历史 AI 对话，第一次修改会建立新对话。
+7. 对测试满意后选择“继续重构”，输入：`合并 text_copy 中完整复制与截断复制的重复循环，保持公开接口、状态、长度、终止符、无效输入不写入和缓冲区外字节完全不变。` 程序保存当前版本后进入完整配置向导，确认启动后进行重构与两侧验证；默认会调用 AI，也可在向导中指定补丁。
+
+也可以完全不调用模型地体验全流程 TUI。用新的目录运行准备脚本，它会额外生成一个合并重复循环的
+真实 Git 补丁及对应配置；正式宿主会应用补丁，再分别编译、运行原版与候选版：
+
+```bash
+bun scripts/setup-test-preparation-demo.ts --out runs/opentui-playground
+bun scripts/cli.ts run ./runs/opentui-playground/repo --task "合并重复复制循环，保持行为不变" --pipeline-file ./runs/opentui-playground/offline-pipeline.json --auto-retry 0 --ui tui
+```
+
+结束后查看“行为对比”的十个检查项和“文件差异”的实际修改，按 Q 退出。
+添加 `--configure` 可先体验完整配置向导；`experience.json` 中也保存了包含绝对路径的 `runOffline` 命令。
+
+如果想完整体验 AI 从零编写测试，在另一次运行中执行：
+
+```powershell
+bun scripts/cli.ts tests prepare ./runs/test-preparation-playground/repo --scope '保护 text_copy 的正常复制、恰好容纳、截断、容量为 0/1、空字符串和 NULL 参数；观察返回状态、copied、required、终止符、无效输入不写入和缓冲区外字节。输入遵守头文件中的 NUL 结尾与不重叠前提。' --ui tui
+```
+
+`prepare` 使用现有 SDK 模型与认证配置，先调查并交付测试，再由宿主编译、执行，最后停在审阅界面。
+执行失败时可以选择“修复执行错误”；交付完整、原版试跑通过后才能“继续重构”。
+修改后选择“保存方案”，方案概览会显示新版本的准确位置。以后使用该位置，而不是原来的预置 `plans/r1/`：
+
+```powershell
+bun scripts/cli.ts run ./runs/test-preparation-playground/repo --tests '<方案概览显示的保存目录>' --task '合并 text_copy 的重复复制循环，保持接口和所有行为不变'
+```
+
+`--ui tui` 会在输入或输出被重定向、CI 环境或 `TERM=dumb` 时报错。请在真实交互终端运行；
+如果当前终端支持 ANSI，但环境变量误设为 `dumb`，可在该 PowerShell 会话先执行
+`$env:TERM = 'xterm-256color'`。颜色仍遵循 `--no-color` 和 `NO_COLOR`；需要彩色显示时，可在当前
+PowerShell 会话执行 `Remove-Item Env:NO_COLOR -ErrorAction SilentlyContinue`。
+`tests review --ui plain` 只查看普通文字，不会调用 AI 或重新构建。
+
 ## 在具体项目中运行与查看进度
 
 目标目录需要是已有提交的 Git 仓库，并包含 C 源文件。先提交需要作为基准的代码，
 再给出具体重构任务；使用新的会话名，已有会话不会被覆盖。
 
 ```bash
-# 最简启动：在终端输入任务，然后选择开始、重新输入或取消
+# 最简启动：进入配置向导，填写任务并开始
 bun scripts/cli.ts run <repo>
 
 # 默认详细模式；省略 --session 时自动生成唯一编号
@@ -59,19 +239,21 @@ bun scripts/cli.ts run <repo> --task "..." --resume task-001 --session task-001-
 
 | 参数 | 默认值与行为 |
 |---|---|
-| `--task <text>` | 重构需求；终端中可省略或留空，程序会提示输入；非交互环境必须提供非空内容 |
+| `--task <text>` | 重构需求；TUI 中缺项打开配置向导，普通文字模式提示输入；非交互环境必须提供 |
+| `--ui auto/tui/plain` | 自动选择、强制终端工作台或普通文字；默认 auto |
+| `--configure` | 启动前编辑完整设置，仅用于 TUI |
 | `--session <id>` | 可选自定义编号；省略时使用时间戳与随机 UUID 生成新编号，不会覆盖已有会话 |
 | `--no-interactive` | 禁止提示输入；适合脚本和 CI，缺少任务时直接以退出码 2 报错 |
 | `--verbosity detailed` | 默认；显示正常 AI 文字、工具名称与目标、命令输出和完整失配结果 |
 | `--verbosity summary` | 省略 AI 回复正文和正常命令输出；失败时显示输出末尾，最多列出前 10 个失配项 |
-| `--progress auto` | 默认；文字模式自动适配终端，JSON 模式关闭实时展示 |
+| `--progress auto` | 默认；交互终端使用 TUI，其他环境逐行输出，JSON 关闭实时展示 |
 | `--progress plain` | 强制逐行实时展示，JSON 模式也可使用 |
 | `--progress off` | 关闭实时展示，仍输出结束报告 |
 | `--no-color` | 禁用颜色；也尊重 `NO_COLOR` 环境变量 |
 | `--resume <会话编号>` | 复用指定中止会话中仍有效的阶段检查点，在新会话中重新验证 |
 
 任务输入只在 stdin 和 stderr 都连接交互终端、未设置有效的 `CI`、且未传 `--no-interactive` 时启用。
-输入需求后会列出仓库、任务与会话设置，可选 `[1] 开始运行`、`[2] 重新输入`、`[0] 取消`；直接回车取消。
+普通文字模式下，输入需求后会列出仓库、任务与会话设置，可选 `[1] 开始运行`、`[2] 重新输入`、`[0] 取消`；直接回车取消。
 任务输入时也可使用 `/cancel`、Ctrl+C 或 Ctrl+D 取消。取消发生在创建会话、调用模型或执行构建之前，退出码为 130。
 提供非空 `--task` 时直接运行，不增加确认步骤；其他无效参数仍直接报错。
 交互提示只写 stderr，即使 stdout 输出 JSON 也不会混入提示文字。
@@ -86,7 +268,7 @@ bun scripts/cli.ts run <repo> --task "..." --no-interactive --no-color --format 
 自定义 `--session` 必须使用新名字；已有名字不会被覆盖，也不会自动恢复。
 恢复使用 `--resume <旧编号>`，恢复后的运行默认也会生成新的会话编号。
 
-进度始终写入 **stderr**，结束报告写入 **stdout**。交互终端保留事件历史并在底部刷新当前阶段、
+进度与 TUI 始终写入 **stderr**，结束报告写入 **stdout**。普通文字模式保留事件历史并在底部刷新当前阶段、
 总耗时、阶段耗时和无实际活动的时间；非交互终端每 10 秒输出状态。心跳与工具存活消息不会重置活动时间。
 阶段不显示推测的进度百分比；声明比较的数量称为“检查项”，不代表测试用例数。
 
@@ -106,7 +288,7 @@ bun scripts/cli.ts run <repo> --task "..." --no-interactive --no-color --format 
 `--no-color`、`NO_COLOR`（包括空值）或 `TERM=dumb` 均关闭颜色，JSON 与落盘报告不会混入展示用 ANSI。
 stderr 输出流标签使用黄色，是否失败以实际执行结果为准。
 
-读取、写入、修改、查找文件及搜索内容只在收到结果后显示一条记录，包含目标、完成或失败及耗时。
+普通文字模式下，读取、写入、修改、查找文件及搜索内容只在收到结果后显示一条记录，包含目标、完成或失败及耗时。
 本地构建方案查询、依赖登记、方案保存和验证方案提交也按此规则展示；
 例如 `mcp__dep-registry__generateBuildWorkflow` 显示为“保存构建方案”，实际构建仍在验证阶段执行。
 子任务、命令及未知工具保留开始和结束记录；未知 MCP 名称缩短为 `服务名/工具名`。

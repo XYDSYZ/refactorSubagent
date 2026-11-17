@@ -2,6 +2,7 @@ import type { InjectionSpec } from "../runtime/inject.js";
 
 export type CliFormat = "human" | "json";
 export type CliVerbosity = "detailed" | "summary";
+export type CliUi = "auto" | "tui" | "plain";
 export type CliProgress = "auto" | "plain" | "off";
 
 export interface PreflightCommand {
@@ -53,7 +54,15 @@ export interface ConfigCommand {
   scope: "project" | "user";
 }
 
+export interface TestsCommand {
+  kind: "tests"; action: "prepare" | "review"; repo: string; scope: string | null; from: string | null;
+  out: string | null; session: string | null; sessionRoot: string | null;
+  ui: CliUi; configure: boolean; verbosity: CliVerbosity; format: CliFormat; color: boolean; noInteractive: boolean;
+}
 export interface RunCommand {
+  ui: CliUi;
+  configure: boolean;
+  tests: string | null;
   verbosity: CliVerbosity;
   progress: CliProgress;
   color: boolean;
@@ -97,7 +106,8 @@ export type CliCommand =
   | WorkflowListCommand
   | ConfigCommand
   | LimitsCommand
-  | RunCommand;
+  | RunCommand
+  | TestsCommand;
 
 export class CliUsageError extends Error {
   constructor(message: string) {
@@ -114,14 +124,15 @@ export class RunTaskRequiredError extends CliUsageError {
   }
 }
 
-export function parseCliArgs(argv: readonly string[]): CliCommand {
+export function parseCliArgs(argv: readonly string[], allowIncomplete = false): CliCommand {
   const args = [...argv];
   const command = args.shift();
   if (command === undefined || command === "help" || command === "--help" || command === "-h") {
     return { kind: "help" };
   }
   if (command === "preflight") return parsePreflight(args);
-  if (command === "run") return parseRun(args);
+  if (command === "run") return parseRun(args, allowIncomplete);
+  if (command === "tests") return parseTests(args, allowIncomplete);
   if (command === "workflow") return parseWorkflow(args);
   if (command === "config") return parseConfig(args);
   if (command === "limits") return parseLimits(args);
@@ -164,13 +175,16 @@ function parseLimits(args: string[]): LimitsCommand {
   return { kind: "limits", repo, format };
 }
 
-function parseRun(args: string[]): RunCommand {
+function parseRun(args: string[], allowIncomplete: boolean): RunCommand {
+  let ui: CliUi = "auto";
+  let configure = false;
   let verbosity: CliVerbosity = "detailed";
   let progress: CliProgress = "auto";
   let color = true;
   let noInteractive = false;
   let repo = ".";
   let task: string | null = null;
+  let tests: string | null = null;
   let session: string | null = null;
   let sessionRoot: string | null = null;
   let worktreeRoot: string | null = null;
@@ -193,8 +207,11 @@ function parseRun(args: string[]): RunCommand {
       progress = value;
       continue;
     }
+    if (arg === "--ui") { ui = parseUi(nextValue(args, ++index, arg)); continue; }
+    if (arg === "--configure") { configure = true; continue; }
     if (arg === "--no-color") { color = false; continue; }
     if (arg === "--no-interactive") { noInteractive = true; continue; }
+    if (arg === "--tests") { tests = nextValue(args, ++index, arg); continue; }
     if (arg === "--task") {
       task = nextValue(args, ++index, "--task");
       continue;
@@ -237,9 +254,46 @@ function parseRun(args: string[]): RunCommand {
     repo = arg;
     sawRepo = true;
   }
-  const command = { kind: "run" as const, repo, session, sessionRoot, worktreeRoot, injections, resume, autoRetry, format, verbosity, progress, color, noInteractive };
-  if (task === null || !task.trim()) throw new RunTaskRequiredError(command);
-  return { ...command, task };
+  const command = { kind: "run" as const, ui, configure, tests, repo, session, sessionRoot, worktreeRoot, injections, resume, autoRetry, format, verbosity, progress, color, noInteractive };
+  if (!allowIncomplete && (task === null || !task.trim())) throw new RunTaskRequiredError(command);
+  return { ...command, task: task ?? "" };
+}
+
+function parseTests(args: string[], allowIncomplete: boolean): TestsCommand {
+  const action = args.shift();
+  if (action !== "prepare" && action !== "review") throw new CliUsageError("tests requires prepare or review");
+  const result: TestsCommand = { kind: "tests", action, repo: ".", scope: null, from: null, out: null, session: null,
+    sessionRoot: null, ui: "auto", configure: false, verbosity: "detailed", format: "human", color: true, noInteractive: false };
+  let sawRepo = false;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === "--configure") { result.configure = true; continue; }
+    if (arg === "--no-color") { result.color = false; continue; }
+    if (arg === "--no-interactive") { result.noInteractive = true; continue; }
+    if (arg === "--scope") { result.scope = nextValue(args, ++i, arg); continue; }
+    if (arg === "--from") { result.from = nextValue(args, ++i, arg); continue; }
+    if (arg === "--out") { result.out = nextValue(args, ++i, arg); continue; }
+    if (arg === "--session") { result.session = nextValue(args, ++i, arg); continue; }
+    if (arg === "--session-root") { result.sessionRoot = nextValue(args, ++i, arg); continue; }
+    if (arg === "--format") { result.format = parseFormat(nextValue(args, ++i, arg)); continue; }
+    if (arg === "--ui") {
+      const ui = nextValue(args, ++i, arg);
+      if (ui !== "auto" && ui !== "tui" && ui !== "plain") throw new CliUsageError("--ui must be auto, tui or plain");
+      result.ui = ui; continue;
+    }
+    if (arg === "--verbosity") {
+      const value = nextValue(args, ++i, arg);
+      if (value !== "detailed" && value !== "summary") throw new CliUsageError("--verbosity must be detailed or summary");
+      result.verbosity = value; continue;
+    }
+    if (arg.startsWith("--")) throw new CliUsageError(`unknown tests option '${arg}'`);
+    if (sawRepo) throw new CliUsageError("tests accepts at most one repository path");
+    result.repo = arg; sawRepo = true;
+  }
+  if (!allowIncomplete && action === "review" && result.from === null) throw new CliUsageError("tests review requires --from <test plan directory>");
+  if (action === "prepare" && result.from !== null) throw new CliUsageError("use tests review to open --from");
+  if (action === "review" && result.scope !== null) throw new CliUsageError("review uses the saved scope; change it through feedback");
+  return result;
 }
 
 function parsePreflight(args: string[]): PreflightCommand {
@@ -402,12 +456,20 @@ function parseFormat(value: string): CliFormat {
   throw new CliUsageError(`format must be 'human' or 'json', got '${value}'`);
 }
 
-export const CLI_HELP = `Usage:
+export const CLI_HELP = `Test preparation:
+  tests prepare <repo> --scope <behavior> [--ui auto|tui|plain] [--out <plan parent>]
+  tests review <repo> --from <plan directory> [--ui auto|tui|plain]
+  run <repo> --task <refactor task> --tests <plan directory>
+  Tests commands also accept --session, --session-root, --verbosity, --format,
+  --configure, --no-color and --no-interactive. Non-interactive preparation saves and exits.
+
+Usage:
   refactor-subagent preflight [repo] [--format human|json]
   refactor-subagent run [repo] [--task <text>] [--session <id>] [--session-root <dir>]
                             [--worktree-root <dir>] [--inject <src>=<dest>]
                             [--resume <aborted-session-id>] [--auto-retry <max>]
                             [--format human|json] [--verbosity detailed|summary]
+                            [--ui auto|tui|plain] [--configure]
                             [--progress auto|plain|off] [--no-color] [--no-interactive]
   refactor-subagent workflow run <entry.ts> [options]
   refactor-subagent workflow build <entry.ts> --id <id> --revision <n> [options]
@@ -421,10 +483,22 @@ then differential build + test execution and the verdict. Where each stage's
 INPUT comes from is configuration (see "Stage sources" below); by default every
 authoring/refactor stage is AI-driven.
 
+Interactive terminal UI (OpenTUI; Windows and Linux):
+  No arguments               Choose run, prepare tests or review a saved plan
+  --ui auto                  TUI for interactive stdin/stderr; plain in CI/JSON (default)
+  --ui tui                   Require the TUI; incompatible with --progress plain/off
+  --ui plain                 Ordinary text, including the existing task prompt
+  --configure                Review/edit complete settings before starting
+Missing task/scope/plan inputs open the configuration wizard in TUI mode.
+Complete arguments start directly. Wizard edits affect this launch only;
+project defaults require an explicit save and show a diff before writing.
+Tab/Shift+Tab moves focus; arrows select; Enter opens/activates; 1-9 switches
+sections; PgUp/PgDn scrolls details; Q exits or offers cancellation.
+
 Run display:
   --verbosity detailed       AI text, tool activity, native output and full report (default)
   --verbosity summary        Important activity and results, without AI text or native output
-  --progress auto            Live status on terminals, plain lines elsewhere; off for JSON (default)
+  --progress auto            TUI on interactive terminals; plain lines elsewhere; off for JSON (default)
   --progress plain           Plain live events on stderr, also with --format json
   --progress off             Final report only
   --no-color                 Disable colors (NO_COLOR is also respected)
@@ -442,7 +516,7 @@ Run input:
 Prompts require interactive stdin AND stderr and are disabled in CI.
 They go to stderr, including in JSON mode; stdout remains a single JSON report.
 Ctrl+C, Ctrl+D, /cancel, or the cancel choice exits before starting a run.
-No prompt is shown when --task is supplied. A session id is not a resume command.
+Complete arguments start directly unless --configure is requested. A session id is not a resume command.
 
 Resume (checkpoint restart):
   --resume <id>               Resume an ABORTED session from its stage
@@ -522,3 +596,8 @@ Workflow build options:
 
 The workflow host currently provides process-level execution and source-policy
 checks. Capability-based filesystem/process access is added in the next phase.`;
+
+function parseUi(value: string): CliUi {
+  if (value !== "auto" && value !== "tui" && value !== "plain") throw new CliUsageError("--ui must be auto, tui or plain");
+  return value;
+}

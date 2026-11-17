@@ -1,3 +1,5 @@
+import { executeTestsCommand } from "../src/cli/tests-command.js";
+import { loadTestPlan, loadLocalDialogue } from "../src/testing/bundle.js";
 import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -33,18 +35,25 @@ import {
 import { StageFlowFinalizationError, type StageFlowResult } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
 import { RunDisplay, formatRunReport } from "../src/cli/display.js";
-import { styled, TerminalStyle } from "../src/cli/terminal.js";
-import { CliInputCancelled, createRunSessionId, resolveCliInput } from "../src/cli/input.js";
+import { cleanText, styled, TerminalStyle } from "../src/cli/terminal.js";
+import { CliInputCancelled, createRunSessionId } from "../src/cli/input.js";
 import { runFeedbackStageFlow } from "../src/runtime/feedback/run.js";
 
+import { prepareCliLaunch } from "../src/cli/ui.js";
+import type { Workbench } from "../src/cli/tui/workbench.js";
+import type { RunScreen } from "../src/cli/tui/run.js";
+
+let activeWorkbench: Workbench | null = null;
 try {
   const { overrides, remaining } = extractLimitArgs(Bun.argv.slice(2));
   const { overrides: pipelineOverrides, remaining: argv } = extractPipelineArgs(remaining);
-  const command = await resolveCliInput(argv);
-  installOwnedProcessSignalHandlers();
-  const exitCode = await execute(command, overrides, pipelineOverrides);
+  const launch = await prepareCliLaunch(argv, overrides, pipelineOverrides);
+  activeWorkbench = launch.workbench;
+  if (launch.command.kind !== "tests") installOwnedProcessSignalHandlers({ beforeExit: async () => { await activeWorkbench?.close(); } });
+  const exitCode = await execute(launch.command, launch.limitOverrides, launch.pipelineOverrides, activeWorkbench);
   if (exitCode !== 0) process.exitCode ??= exitCode;
 } catch (cause) {
+  await activeWorkbench?.close();
   if (cause instanceof CliInputCancelled) {
     console.error(cause.message);
     process.exitCode ??= cause.exitCode;
@@ -55,19 +64,35 @@ try {
     console.error(cause instanceof Error ? cause.stack ?? cause.message : String(cause));
     process.exitCode ??= 1;
   }
-}
+} finally { await activeWorkbench?.close(); }
 
 async function execute(
   command: CliCommand,
   overrides: LayerOverrides,
   pipelineOverrides: LayerOverrides,
+  workbench: Workbench | null = null,
 ): Promise<number> {
   if (command.kind === "help") {
     console.log(CLI_HELP);
     return 0;
   }
   if (command.kind === "preflight") return executePreflight(command, overrides);
-  if (command.kind === "run") return executeRun(command, overrides, pipelineOverrides);
+  if (command.kind === "run") return executeRun(command, overrides, pipelineOverrides, workbench);
+  if (command.kind === "tests") {
+    const outcome = await executeTestsCommand(command, overrides, workbench);
+    if (outcome.continuation === null) return outcome.exitCode;
+    installOwnedProcessSignalHandlers({ beforeExit: async () => { await workbench?.close(); } });
+    const continuation: RunCommand = { kind: "run", ui: command.ui, configure: false, repo: command.repo, task: outcome.continuation.task, tests: outcome.continuation.directory,
+      session: null, sessionRoot: command.sessionRoot, worktreeRoot: null, injections: [], resume: null, autoRetry: 3,
+      format: command.format, verbosity: command.verbosity, progress: "auto", color: command.color, noInteractive: false };
+    if (workbench) {
+      const { LaunchWizard } = await import("../src/cli/tui/configure.js");
+      const configured = await new LaunchWizard(workbench, continuation, overrides, pipelineOverrides).run();
+      if (configured.command.kind !== "run") throw new Error("continuation must be a full run");
+      return executeRun(configured.command, configured.limitOverrides, configured.pipelineOverrides, workbench);
+    }
+    return executeRun(continuation, overrides, pipelineOverrides, workbench);
+  }
   if (command.kind === "workflow-build") return executeWorkflowBuild(command, overrides);
   if (command.kind === "workflow-list") return executeWorkflowList(command, overrides);
   if (command.kind === "config") return executeConfig(command);
@@ -130,14 +155,26 @@ async function executeRun(
   command: RunCommand,
   overrides: LayerOverrides,
   pipelineOverrides: LayerOverrides,
+  workbench: Workbench | null = null,
 ): Promise<number> {
   const repo = resolve(command.repo);
   const resolved = resolvePipeline({ repoRoot: repo, overrides: pipelineOverrides });
+  if (command.tests !== null && command.resume !== null) throw new CliUsageError("--tests cannot replace workflows while --resume restores a saved run; start a new run to use a test plan");
+  if (command.tests !== null) {
+    if (resolved.pipeline.stages.workflows.mode !== "ai" || (pipelineOverrides.values ?? []).some(value => value.startsWith("stages.workflows.")))
+      throw new CliUsageError("--tests conflicts with an explicitly configured workflows stage");
+    resolved.pipeline.stages.workflows = { mode: "test-plan", directory: resolve(command.tests) };
+  }
+  const planDirectory = resolved.pipeline.stages.workflows.mode === "test-plan" ? resolve(resolved.pipeline.stages.workflows.directory) : null;
+  const testPlan = planDirectory === null ? null : loadTestPlan(planDirectory);
+  const dialogue = testPlan === null ? null : loadLocalDialogue(join(repo, ".refactor", "test-plan-dialogues"), testPlan.manifest.id);
   const flow = buildStageFlow(resolved.pipeline);
   const sessionId = command.session ?? createRunSessionId();
   const sessionRoot = command.sessionRoot === null ? repo : resolve(command.sessionRoot);
   const resumeFrom = command.resume;
-  const display = new RunDisplay({ format: command.format, verbosity: command.verbosity,
+  let screen: RunScreen | null = null;
+  if (workbench) { const { RunScreen } = await import("../src/cli/tui/run.js"); screen = new RunScreen(workbench, command.verbosity); }
+  const display = screen ?? new RunDisplay({ format: command.format, verbosity: command.verbosity,
     progress: command.progress, color: command.color });
   const limits = resolveLimits({ repoRoot: repo, overrides });
   const onExit = (): void => { display.stop(); };
@@ -155,6 +192,7 @@ async function executeRun(
     let autoRetryMeta: { rounds: number; stoppedBecause: string; lastSession: string } | null = null;
     try {
       const request = {
+        ...(testPlan === null ? {} : { workflowContext: { scope: testPlan.content.metadata.scope, ...(dialogue === null ? {} : { dialogue }) } }),
         repoPath: repo,
         task: command.task,
         sessionRoot,
@@ -177,6 +215,7 @@ async function executeRun(
       result = error.result;
     }
     display.stop();
+    if (screen && workbench) { await screen.finish(result.report); await workbench.close(); }
     const declaredBuilds = result.declared?.declaredSet.builds.map((build) => build.id) ?? [];
     const summary = {
       state: result.state,
@@ -205,16 +244,18 @@ async function executeRun(
       console.log(JSON.stringify(summary, null, 2));
     } else {
       const style = new TerminalStyle({ color: command.color, output: process.stdout });
-      console.log(formatRunReport(result.report, command.verbosity, { color: command.color, output: process.stdout }));
-      console.log(style.render([styled("pipeline: ", "accent"), summary.pipeline]));
-      for (const layer of resolved.sources) console.log(style.render([styled("pipeline layer: ", "accent"), layer]));
-      if (result.provenance.injected.length > 0) {
-        const authority = result.provenance.verification_authoritative
-          ? ""
-          : " (verification replaced: verdict is non-authoritative)";
-        console.log(style.render([styled("injected stages: ", "accent"), result.provenance.injected.join(", "), styled(authority, "warning")]));
+      console.log(screen ? cleanText(`${result.report.state} · ${result.report.decision_reason ?? result.report.abort_reason ?? "运行结束"}\n完整报告：${result.report.report_path}${result.report.candidate ? "\n候选分支：" + result.report.candidate.branch + "（尚未合并）" : ""}${result.report.finalization_error ? "\n结束处理失败：" + result.report.finalization_error : ""}`) : formatRunReport(result.report, command.verbosity, { color: command.color, output: process.stdout }));
+      if (!screen) {
+        console.log(style.render([styled("pipeline: ", "accent"), summary.pipeline]));
+        for (const layer of resolved.sources) console.log(style.render([styled("pipeline layer: ", "accent"), layer]));
+        if (result.provenance.injected.length > 0) {
+          const authority = result.provenance.verification_authoritative
+            ? ""
+            : " (verification replaced: verdict is non-authoritative)";
+          console.log(style.render([styled("injected stages: ", "accent"), result.provenance.injected.join(", "), styled(authority, "warning")]));
+        }
+        if (declaredBuilds.length > 0) console.log(style.render([styled("declared builds: ", "accent"), declaredBuilds.join(", ")]));
       }
-      if (declaredBuilds.length > 0) console.log(style.render([styled("declared builds: ", "accent"), declaredBuilds.join(", ")]));
     }
     return result.state === "ACCEPTED" && result.report.finalization_error === null ? 0 : 1;
   } finally {
