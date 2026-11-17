@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { FeedbackUpdate } from "../src/runtime/feedback/types.js";
 import { freshFeedbackState, loadFeedbackState, saveFeedbackState } from "../src/runtime/feedback/state.js";
 import { parseCliArgs } from "../src/cli/args.js";
 import { join } from "node:path";
@@ -96,7 +97,7 @@ function fakeResult(options: {
 interface Captured {
   rounds: string[];
   repairContexts: RepairRoundContext[];
-  notifications: string[];
+  notifications: FeedbackUpdate[];
   pinnedCalls: number;
 }
 
@@ -111,7 +112,7 @@ function makeConfig(
   return {
     baseTask: "重构任务",
     budget,
-    notify: (message) => captured.notifications.push(message),
+    onFeedback: (update) => captured.notifications.push(update),
     runInitial: async () => {
       captured.rounds.push("initial");
       const step = script[Math.min(call, script.length - 1)]!;
@@ -341,7 +342,7 @@ describe("runFeedbackLoop", () => {
     expect(context.failedBuildId).toBeNull();
     // The candidate branch is preserved untouched by the build repair.
     expect(context.candidateBranch).toBe("refactor/agent-x");
-    expect(captured.notifications.join("\n")).toContain("构建修理工");
+    expect(captured.notifications).toEqual(expect.arrayContaining([expect.objectContaining({ action: "repair-start", lane: "build" })]));
   });
 
   test("build lane carries the attributed failed build id into the repair context", async () => {
@@ -379,7 +380,7 @@ describe("runFeedbackLoop", () => {
     const outcome = await runFeedbackLoop({ ...config, runBuildRepair: async () => null });
     expect(outcome.stoppedBecause).toBe("repair-failed");
     expect(captured.repairContexts).toHaveLength(0);
-    expect(captured.notifications.join("\n")).toContain("没有交付可用的修复方案");
+    expect(captured.notifications.at(-1)).toMatchObject({ action: "stop", reason: "repair-failed", budget_used: 1 });
   });
 
   test("a failed build repair still consumes and persists the budget unit", async () => {
@@ -641,7 +642,7 @@ describe("runFeedbackLoop", () => {
     const outcome = await runFeedbackLoop({ ...config, loadPinnedWorkflows: () => null });
     expect(outcome.stoppedBecause).toBe("missing-patch");
     expect(captured.repairContexts).toHaveLength(0);
-    expect(captured.notifications.join("\n")).toContain("考卷");
+    expect(captured.notifications.at(-1)).toMatchObject({ action: "stop", reason: "missing-patch" });
   });
 });
 
@@ -795,4 +796,3 @@ export default async (ctx) => {
     }
   }, 180_000);
 });
-

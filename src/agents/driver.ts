@@ -10,6 +10,7 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 
 import { TOOL_PLUGIN_DIR } from "./workflow-skills.js";
+import { AgentProgress } from "./progress.js";
 
 /**
  * Operations no agent session may perform, whatever its allowlist says.
@@ -58,6 +59,7 @@ export interface DriverRun {
 }
 
 export interface DriverOptions {
+  role?: string;
   cwd: string;
   prompt: string;
   systemPrompt?: string;
@@ -163,6 +165,7 @@ export async function runAgent(o: DriverOptions): Promise<DriverRun> {
     }, timeoutMs);
   }
   const logger = o.logger;
+  const progress = new AgentProgress(logger, o.role ?? "AI", o.model);
   const logSession = (msg: unknown): void => { logSessionEvent(logger, msg); };
   // Stall guard: the SDK can hang with no message when its CLI subprocess dies
   // (observed under a model proxy). Treat N seconds without ANY message as a
@@ -194,6 +197,7 @@ export async function runAgent(o: DriverOptions): Promise<DriverRun> {
       armStall();
       if (next.done) break;
       const msg = next.value;
+      progress.accept(msg);
       logSession(msg);
       if (msg.type === "result") {
         isError = msg.is_error;

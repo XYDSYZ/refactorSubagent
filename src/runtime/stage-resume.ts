@@ -16,6 +16,7 @@ import {
   runStageFlow,
   type StageCheckpoint,
   type StageFlow,
+  type StageFlowRequest,
   type StageFlowResult,
   type StageName,
   type WorkflowsStage,
@@ -81,6 +82,8 @@ export interface StageResumeRequest {
   readonly limitOverrides?: LayerOverrides;
   readonly knownEnvironmentPatterns?: readonly RegExp[];
   readonly logger?: E2ELogger;
+  readonly onProgress?: StageFlowRequest["onProgress"];
+  readonly configuration?: StageFlowRequest["configuration"];
 }
 
 export interface StageResumePlan {
@@ -498,6 +501,8 @@ export async function runStageFlowResume(req: StageResumeRequest): Promise<Stage
       ? { knownEnvironmentPatterns: req.knownEnvironmentPatterns }
       : {}),
     ...(req.logger !== undefined ? { logger: req.logger } : {}),
+    ...(req.onProgress !== undefined ? { onProgress: req.onProgress } : {}),
+    ...(req.configuration !== undefined ? { configuration: req.configuration } : {}),
     flow,
     resume: { sourceSessionId: req.sourceSessionId, reusedStages },
   });

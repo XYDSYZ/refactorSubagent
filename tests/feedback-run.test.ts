@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
+import type { RunProgressEvent, RunReport } from "../src/runtime/progress.js";
 import { fileURLToPath } from "node:url";
 import { spawnOwnedProcess } from "../shared/owned-process.js";
 import type { EffectivePlan } from "../src/runtime/feedback/effective-plan.js";
@@ -10,6 +12,8 @@ import type { WorkflowsCheckpointView } from "../src/runtime/stage-resume.js";
 import type { ExpectationBaseline } from "../src/artifacts/index.js";
 
 interface Replay {
+  progress: RunProgressEvent[];
+  runReport: RunReport;
   stoppedBecause: string;
   calls: { role: string; resume: string | null }[];
   state: FeedbackState;
@@ -18,11 +22,11 @@ interface Replay {
   snapshots: { session: string; state: string; workflows: WorkflowsCheckpointView; contentHash: string; baseline: ExpectationBaseline | null; measuredBaseline: boolean }[];
 }
 
-async function replay(scenario: string) {
+async function replay(scenario: string, displayArgs: string[] = []) {
   const root = mkdtempSync(join(tmpdir(), "rfr-feedback-replay-"));
   const process = spawnOwnedProcess({
     program: globalThis.process.execPath,
-    args: [fileURLToPath(new URL("./helpers/feedback-replay.ts", import.meta.url)), scenario, root],
+    args: [fileURLToPath(new URL("./helpers/feedback-replay.ts", import.meta.url)), scenario, root, ...displayArgs],
     cwd: fileURLToPath(new URL("..", import.meta.url)), cooperativeShutdown: true,
     env: { ...globalThis.process.env, RFR_LOG_LEVEL: "error" },
   });
@@ -35,7 +39,9 @@ async function replay(scenario: string) {
     const exit = await process.exited;
     const expected = scenario.startsWith("cli-budget") ? 1 : 0;
     if (exit.error !== null || exit.code !== expected) throw new Error(`replay ${scenario} exited ${String(exit.code)}: ${String(exit.error)}\n${stderr}\n${stdout}`);
-    return { report: JSON.parse(readFileSync(join(root, "replay.json"), "utf8")) as Replay, stdout, stderr };
+    return { report: JSON.parse(readFileSync(join(root, "replay.json"), "utf8")) as Replay, stdout, stderr,
+      displays: !scenario.startsWith("cli-") ? Object.fromEntries(["detailed", "summary"].map((mode) => [mode,
+        stripVTControlCharacters(readFileSync(join(root, `display-${mode}.ansi`), "utf8"))])) : {} };
   } finally {
     clearTimeout(timer);
     await process.stop();
@@ -45,7 +51,7 @@ async function replay(scenario: string) {
 
 describe("feedback through the real pipeline (offline SDK replay)", () => {
   test("repairing build A then build B retains both delivered repairs", async () => {
-    const { report } = await replay("build-pair");
+    const { report, displays } = await replay("build-pair");
     expect(report.stoppedBecause).toBe("accepted");
     expect(report.snapshots.map((round) => round.state)).toEqual(["ABORTED", "ABORTED", "ACCEPTED"]);
     const ids = report.snapshots.map((round) => round.workflows.builds.map((build) => build.id));
@@ -53,6 +59,15 @@ describe("feedback through the real pipeline (offline SDK replay)", () => {
     expect(ids[2]![0]).toBe(ids[1]![0]);
     expect(ids[2]![1]).not.toBe(ids[1]![1]);
     expect(report.state.budgetUsed).toBe(2);
+    expect(report.progress.every((event, index, all) => index === 0 || event.elapsed_ms >= all[index - 1]!.elapsed_ms)).toBe(true);
+    expect(report.runReport.feedback?.rounds.map((round) => round.state)).toEqual(["ABORTED", "ABORTED", "ACCEPTED"]);
+    expect(report.runReport.feedback?.build_repairs).toHaveLength(2);
+    expect(report.runReport.elapsed_ms).toBeGreaterThanOrEqual(report.runReport.feedback!.rounds.reduce((sum, round) => sum + round.elapsed_ms, 0));
+    expect(report.runReport.agents.filter((agent) => agent.role === "build-repair")).toHaveLength(2);
+    expect(displays.detailed).toContain("离线AI正文");
+    expect(displays.summary).not.toContain("离线AI正文");
+    expect(displays.summary).toContain("构建方案修复");
+    expect(displays.summary).toContain("ACCEPTED");
   }, 120_000);
 
   test.each(["build-refactor", "test-refactor"])("%s keeps the new plan when continuing the code conversation", async (scenario) => {
@@ -84,6 +99,9 @@ describe("feedback through the real pipeline (offline SDK replay)", () => {
     const result = JSON.parse(stdout);
     expect(result.state).toBe("ABORTED");
     expect(result.auto_retry.stoppedBecause).toBe("budget-exhausted");
+    expect(result.report.feedback.budget_used_before).toBe(1);
+    expect(result.report.feedback.budget_used).toBe(1);
+    expect(result.report.feedback.stopped_because).toBe("budget-exhausted");
     expect(report.state.budgetUsed).toBe(1);
     expect(report.calls.filter((call) => call.role === "build")).toHaveLength(1);
     expect(report.owner).toBe("first");
@@ -92,7 +110,8 @@ describe("feedback through the real pipeline (offline SDK replay)", () => {
   }, 120_000);
 
   test("a writer recreated during resume can subsequently continue from the shared transcript store", async () => {
-    const { report, stdout } = await replay("cli-reauthor");
+    const { report, stdout, stderr } = await replay("cli-reauthor");
+    expect(stderr).toBe("");
     expect(JSON.parse(stdout).state).toBe("ACCEPTED");
     expect(report.calls.filter((call) => call.role === "writer")).toEqual([
       { role: "writer", resume: null },
@@ -104,10 +123,21 @@ describe("feedback through the real pipeline (offline SDK replay)", () => {
   }, 120_000);
 
   test("CLI resume can repair a run that initially had feedback disabled, using its old conversations", async () => {
-    const { report, stdout } = await replay("cli-resume");
+    const { report, stdout, stderr } = await replay("cli-resume", ["--progress", "plain", "--verbosity", "summary"]);
     const result = JSON.parse(stdout);
     expect(result.state).toBe("ACCEPTED");
     expect(result.auto_retry.rounds).toBe(3);
+    expect(result.verification_authoritative).toBe(true);
+    expect(stderr).toContain("恢复运行");
+    expect(stderr).toContain("继续原重构对话");
+    expect(stderr).toContain("原版构建与测试观测复用");
+    expect(stderr).not.toContain("离线AI正文");
+    expect(stdout).not.toContain("\u001b[");
+    expect(result.report.feedback.owner_session).toBe("first");
+    expect(result.report.feedback.resumed_from).toBe("first");
+    expect(result.report.feedback.budget_used).toBe(2);
+    expect(result.report.builds.find((build: { side: string }) => build.side === "baseline").status).toBe("reused");
+    expect(result.report.tests.find((test: { side: string }) => test.side === "baseline").status).toBe("reused");
     expect(report.owner).toBe("first");
     expect(report.state.budgetUsed).toBe(2);
     expect(report.calls.filter((call) => call.role === "writer")).toHaveLength(1);

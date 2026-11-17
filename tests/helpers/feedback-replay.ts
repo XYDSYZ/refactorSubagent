@@ -1,4 +1,7 @@
 /** Isolated SDK replay: real CLI, registry, workflows, Git and comparisons. */
+import { AgentProgress } from "../../src/agents/progress.js";
+import { RunDisplay, formatRunReport } from "../../src/cli/display.js";
+import { DEFAULT_LIMITS } from "../../src/config/limits.js";
 import { mock } from "bun:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -11,7 +14,7 @@ import { mcpText, withMcpClient } from "./mcp-client.js";
 import { analysisReport } from "./verification-analysis.js";
 
 installOwnedProcessSignalHandlers();
-const [scenario, rootArg] = Bun.argv.slice(2);
+const [scenario, rootArg, ...displayArgs] = Bun.argv.slice(2);
 assert(scenario && rootArg, "scenario and fixture root are required");
 const root = resolve(rootArg);
 const repo = join(root, "repo");
@@ -62,6 +65,12 @@ mock.module("../../src/agents/driver.js", () => ({
     if (options.sessionStore !== undefined) {
       await options.sessionStore.append({ sessionId: id, projectKey: "replay" }, [{ uuid: `replay-${calls.length}`, type: "assistant" }]);
     }
+    const agent = new AgentProgress(options.logger, options.role ?? role, "offline-model");
+    agent.accept({ type: "assistant", message: { id: "reply", content: [
+      { type: "text", text: `离线AI正文：${role}${options.resumeSessionId ? "继续修复" : "首次执行"}` },
+      { type: "tool_use", id: "read", name: "Read", input: { file_path: "main.c" } },
+    ] } });
+    agent.accept({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "read", content: "not displayed" }] } });
     if (role === "refactor") {
       const repairing = options.resumeSessionId !== undefined;
       writeFileSync(join(options.cwd, "main.c"), `int main(void) { return 0; } /* ${repairing ? "repaired" : "refactored"} */\n`);
@@ -115,6 +124,8 @@ export default async (ctx) => {
 `);
       });
     }
+    agent.accept({ type: "result", session_id: id, result: "offline replay delivered", num_turns: 1,
+      duration_ms: 2, total_cost_usd: 0.001, usage: { input_tokens: 10, output_tokens: 5 } });
     return { result: "offline replay delivered", isError: false, timedOut: false, sessionId: id };
   },
 }));
@@ -124,8 +135,8 @@ const { runStageFlow } = await import("../../src/runtime/stage-flow.js");
 const { loadWorkflowsCheckpointView } = await import("../../src/runtime/stage-resume.js");
 const { workflowContentHash, loadEffectivePlan } = await import("../../src/runtime/feedback/effective-plan.js");
 const { loadFeedbackState, loadFeedbackOwner } = await import("../../src/runtime/feedback/state.js");
-const request = { repoPath: repo, task: "refactor the implementation without changing output", sessionRoot, sessionId: "first" };
-const notifications: string[] = [];
+const request = { repoPath: repo, task: "refactor the implementation without changing output", sessionRoot, sessionId: "first", onProgress: (event: import("../../src/runtime/progress.js").RunProgressEvent) => progress.push(event) };
+const progress: import("../../src/runtime/progress.js").RunProgressEvent[] = [];
 let finalSession: string;
 let outcome: Awaited<ReturnType<typeof runFeedbackStageFlow>> | null = null;
 if (scenario === "cli-resume" || scenario === "cli-reauthor") {
@@ -138,7 +149,7 @@ if (scenario === "cli-resume" || scenario === "cli-reauthor") {
   finalSession = "first";
 } else {
   outcome = await runFeedbackStageFlow(request, {
-    budget: noProgress ? 3 : 4, resumeFrom: null, notify: (message) => notifications.push(message),
+    budget: noProgress ? 3 : 4, resumeFrom: null,
   });
   finalSession = outcome.rounds.at(-1)!.sessionId;
 }
@@ -146,7 +157,7 @@ if (scenario.startsWith("cli-")) {
   const sourceSession = (scenario === "cli-resume" || scenario === "cli-reauthor") ? "first" : finalSession;
   Bun.argv.splice(0, Bun.argv.length, process.execPath, "scripts/cli.ts", "run", repo, "--task", request.task,
     "--session-root", sessionRoot, "--session", "recovered", "--resume", sourceSession,
-    "--auto-retry", scenario === "cli-budget0" ? "0" : (scenario === "cli-resume" || scenario === "cli-reauthor") ? "3" : "1", "--format", "json");
+    "--auto-retry", scenario === "cli-budget0" ? "0" : (scenario === "cli-resume" || scenario === "cli-reauthor") ? "3" : "1", "--format", "json", ...displayArgs);
   // The import executes the real argument parser and CLI branch.
   await import("../../scripts/cli.js");
   const owner = loadFeedbackOwner(sessionRoot, "recovered");
@@ -173,7 +184,22 @@ const snapshots = state.rounds.map((round) => {
     failure: artifact("failure-report.json"),
   };
 });
+if (outcome !== null) {
+  for (const verbosity of ["detailed", "summary"] as const) {
+    const chunks: string[] = [];
+    let elapsed = 0;
+    const output = { isTTY: true, columns: 100, write: (text: string) => chunks.push(text) };
+    const display = new RunDisplay({ format: "human", verbosity, progress: "auto", color: true,
+      output, now: () => elapsed, env: {} });
+    display.start({ repo, task: request.task, session: "first", log_dir: join(sessionRoot, ".refactor", "e2e", "first"),
+      pipeline: "离线 SDK 回放，执行真实本地工作流", pipeline_sources: [], limits: DEFAULT_LIMITS,
+      limit_sources: [], auto_retry: 4 });
+    for (const event of progress) { elapsed = event.elapsed_ms; display.receive(event); }
+    display.stop();
+    writeFileSync(join(root, `display-${verbosity}.ansi`), chunks.join("") + "\n" + formatRunReport(outcome.result.report, verbosity, { color: true, output, env: {} }));
+  }
+}
 writeFileSync(join(root, "replay.json"), JSON.stringify({
-  stoppedBecause: outcome?.stoppedBecause, notifications, calls, state, snapshots,
+  stoppedBecause: outcome?.stoppedBecause, progress, runReport: outcome?.result.report, calls, state, snapshots,
   plan: loadEffectivePlan(stateDir), owner: loadFeedbackOwner(sessionRoot, finalSession),
 }, null, 2));

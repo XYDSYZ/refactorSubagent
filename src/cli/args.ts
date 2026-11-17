@@ -1,6 +1,8 @@
 import type { InjectionSpec } from "../runtime/inject.js";
 
 export type CliFormat = "human" | "json";
+export type CliVerbosity = "detailed" | "summary";
+export type CliProgress = "auto" | "plain" | "off";
 
 export interface PreflightCommand {
   kind: "preflight";
@@ -52,6 +54,11 @@ export interface ConfigCommand {
 }
 
 export interface RunCommand {
+  verbosity: CliVerbosity;
+  progress: CliProgress;
+  color: boolean;
+  /** Disable terminal prompts even when stdin/stderr are interactive. */
+  noInteractive: boolean;
   kind: "run";
   /** Git repository containing the base C project. */
   repo: string;
@@ -96,6 +103,14 @@ export class CliUsageError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "CliUsageError";
+  }
+}
+
+/** All other run arguments have been checked before asking for the missing task. */
+export class RunTaskRequiredError extends CliUsageError {
+  constructor(readonly command: Omit<RunCommand, "task">) {
+    super("run requires --task <text>; omit it only in an interactive terminal");
+    this.name = "RunTaskRequiredError";
   }
 }
 
@@ -150,6 +165,10 @@ function parseLimits(args: string[]): LimitsCommand {
 }
 
 function parseRun(args: string[]): RunCommand {
+  let verbosity: CliVerbosity = "detailed";
+  let progress: CliProgress = "auto";
+  let color = true;
+  let noInteractive = false;
   let repo = ".";
   let task: string | null = null;
   let session: string | null = null;
@@ -162,6 +181,20 @@ function parseRun(args: string[]): RunCommand {
   let sawRepo = false;
   for (let index = 0; index < args.length; index++) {
     const arg = args[index]!;
+    if (arg === "--verbosity") {
+      const value = nextValue(args, ++index, arg);
+      if (value !== "detailed" && value !== "summary") throw new CliUsageError("--verbosity must be detailed or summary");
+      verbosity = value;
+      continue;
+    }
+    if (arg === "--progress") {
+      const value = nextValue(args, ++index, arg);
+      if (value !== "auto" && value !== "plain" && value !== "off") throw new CliUsageError("--progress must be auto, plain or off");
+      progress = value;
+      continue;
+    }
+    if (arg === "--no-color") { color = false; continue; }
+    if (arg === "--no-interactive") { noInteractive = true; continue; }
     if (arg === "--task") {
       task = nextValue(args, ++index, "--task");
       continue;
@@ -204,8 +237,9 @@ function parseRun(args: string[]): RunCommand {
     repo = arg;
     sawRepo = true;
   }
-  if (task === null) throw new CliUsageError("run requires --task <text>");
-  return { kind: "run", repo, task, session, sessionRoot, worktreeRoot, injections, resume, autoRetry, format };
+  const command = { kind: "run" as const, repo, session, sessionRoot, worktreeRoot, injections, resume, autoRetry, format, verbosity, progress, color, noInteractive };
+  if (task === null || !task.trim()) throw new RunTaskRequiredError(command);
+  return { ...command, task };
 }
 
 function parsePreflight(args: string[]): PreflightCommand {
@@ -370,9 +404,11 @@ function parseFormat(value: string): CliFormat {
 
 export const CLI_HELP = `Usage:
   refactor-subagent preflight [repo] [--format human|json]
-  refactor-subagent run [repo] --task <text> [--session <id>] [--session-root <dir>]
+  refactor-subagent run [repo] [--task <text>] [--session <id>] [--session-root <dir>]
                             [--worktree-root <dir>] [--inject <src>=<dest>]
                             [--resume <aborted-session-id>] [--auto-retry <max>]
+                            [--format human|json] [--verbosity detailed|summary]
+                            [--progress auto|plain|off] [--no-color] [--no-interactive]
   refactor-subagent workflow run <entry.ts> [options]
   refactor-subagent workflow build <entry.ts> --id <id> --revision <n> [options]
   refactor-subagent workflow list [--cwd <dir>] [--format human|json]
@@ -384,6 +420,29 @@ test-writer's verification strategy, the candidate worktrees, the refactor sessi
 then differential build + test execution and the verdict. Where each stage's
 INPUT comes from is configuration (see "Stage sources" below); by default every
 authoring/refactor stage is AI-driven.
+
+Run display:
+  --verbosity detailed       AI text, tool activity, native output and full report (default)
+  --verbosity summary        Important activity and results, without AI text or native output
+  --progress auto            Live status on terminals, plain lines elsewhere; off for JSON (default)
+  --progress plain           Plain live events on stderr, also with --format json
+  --progress off             Final report only
+  --no-color                 Disable colors (NO_COLOR is also respected)
+Progress goes to stderr; the final human/JSON report goes to stdout.
+Detailed display does not require RFR_LOG_LEVEL=trace. The durable report is
+saved as artifacts/run-summary.json.
+
+Run input:
+  --task <text>              Required task; when omitted/blank, a terminal prompts
+                             for the task and offers start, edit, or cancel.
+  --session <id>             Optional custom name. By default a timestamp + random
+                             UUID is generated for each new run (including resume).
+                             Custom names must be unique and never overwrite a run.
+  --no-interactive           Never prompt. Use --task in scripts and CI.
+Prompts require interactive stdin AND stderr and are disabled in CI.
+They go to stderr, including in JSON mode; stdout remains a single JSON report.
+Ctrl+C, Ctrl+D, /cancel, or the cancel choice exits before starting a run.
+No prompt is shown when --task is supplied. A session id is not a resume command.
 
 Resume (checkpoint restart):
   --resume <id>               Resume an ABORTED session from its stage
@@ -406,6 +465,10 @@ Feedback repairs:
                               Stops on ACCEPTED, exhausted attempts, unchanged
                               content and failure, or an unrepairable failure.
                               0 disables automatic repairs.
+                              Live status shows the round, repair owner, cause,
+                              remaining attempts and what will be re-run/reused.
+                              report.feedback records this invocation's rounds;
+                              per-round evidence is kept in round-summary.json.
 
 Stage sources (accepted by "run"), later wins:
   --pipeline-file <path>      Extra pipeline layer, merged in order (repeatable)

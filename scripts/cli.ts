@@ -4,7 +4,6 @@ import { dirname, join, resolve } from "node:path";
 import {
   CLI_HELP,
   CliUsageError,
-  parseCliArgs,
   type CliCommand,
   type ConfigCommand,
   type LimitsCommand,
@@ -31,20 +30,25 @@ import {
   extractPipelineArgs,
   resolvePipeline,
 } from "../src/config/pipeline.js";
-import { runStageFlow, type StageFlowResult, type StageFlowRequest } from "../src/runtime/stage-flow.js";
+import { StageFlowFinalizationError, type StageFlowResult } from "../src/runtime/stage-flow.js";
 import { installOwnedProcessSignalHandlers } from "../shared/owned-process.js";
+import { RunDisplay, formatRunReport } from "../src/cli/display.js";
+import { styled, TerminalStyle } from "../src/cli/terminal.js";
+import { CliInputCancelled, createRunSessionId, resolveCliInput } from "../src/cli/input.js";
 import { runFeedbackStageFlow } from "../src/runtime/feedback/run.js";
-
-installOwnedProcessSignalHandlers();
 
 try {
   const { overrides, remaining } = extractLimitArgs(Bun.argv.slice(2));
   const { overrides: pipelineOverrides, remaining: argv } = extractPipelineArgs(remaining);
-  const command = parseCliArgs(argv);
+  const command = await resolveCliInput(argv);
+  installOwnedProcessSignalHandlers();
   const exitCode = await execute(command, overrides, pipelineOverrides);
   if (exitCode !== 0) process.exitCode ??= exitCode;
 } catch (cause) {
-  if (cause instanceof CliUsageError) {
+  if (cause instanceof CliInputCancelled) {
+    console.error(cause.message);
+    process.exitCode ??= cause.exitCode;
+  } else if (cause instanceof CliUsageError) {
     console.error(`error: ${cause.message}\n\n${CLI_HELP}`);
     process.exitCode ??= 2;
   } else {
@@ -130,98 +134,95 @@ async function executeRun(
   const repo = resolve(command.repo);
   const resolved = resolvePipeline({ repoRoot: repo, overrides: pipelineOverrides });
   const flow = buildStageFlow(resolved.pipeline);
-  const sessionId = command.session ?? `run-${Date.now().toString(36)}`;
+  const sessionId = command.session ?? createRunSessionId();
   const sessionRoot = command.sessionRoot === null ? repo : resolve(command.sessionRoot);
-  // A resume overlays its reused checkpoints on top of the user's configured
-  // stage sources: stages without a reusable checkpoint still run whatever
-  // the pipeline config / --stage selected, and injections are forwarded so
-  // the resumed run verifies the same environment as the failed one.
   const resumeFrom = command.resume;
-  const request: StageFlowRequest = {
-    repoPath: repo, task: command.task, sessionRoot, sessionId, flow,
-    ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
-    ...(command.injections.length > 0 ? { injections: command.injections } : {}),
-    limitOverrides: overrides,
-  };
-  let result: StageFlowResult;
-  let autoRetryMeta: { rounds: number; stoppedBecause: string; lastSession: string } | null = null;
-  if (command.autoRetry > 0 || resumeFrom !== null) {
-    const outcome = await runFeedbackStageFlow(request, {
-      budget: command.autoRetry, resumeFrom,
-      notify: (message) => console.error(message),
-    });
-    result = outcome.result;
-    autoRetryMeta = {
-      rounds: outcome.rounds.length,
-      stoppedBecause: outcome.stoppedBecause,
-      lastSession: outcome.rounds.at(-1)!.sessionId,
+  const display = new RunDisplay({ format: command.format, verbosity: command.verbosity,
+    progress: command.progress, color: command.color });
+  const limits = resolveLimits({ repoRoot: repo, overrides });
+  const onExit = (): void => { display.stop(); };
+  const onInterrupt = (): void => { display.interrupt("SIGINT"); };
+  const onTerminate = (): void => { display.interrupt("SIGTERM"); };
+  process.once("exit", onExit);
+  process.once("SIGINT", onInterrupt);
+  process.once("SIGTERM", onTerminate);
+  display.start({ repo, task: command.task, session: sessionId,
+    log_dir: join(sessionRoot, ".refactor", "e2e", sessionId), pipeline: describePipeline(resolved.pipeline),
+    pipeline_sources: resolved.sources, pipeline_config: resolved.pipeline, pipeline_overrides: pipelineOverrides.values,
+    limits: limits.limits, limit_sources: limits.sources, limit_overrides: overrides.values, auto_retry: command.autoRetry });
+  try {
+    let result: StageFlowResult;
+    let autoRetryMeta: { rounds: number; stoppedBecause: string; lastSession: string } | null = null;
+    try {
+      const request = {
+        repoPath: repo,
+        task: command.task,
+        sessionRoot,
+        sessionId,
+        flow,
+        ...(command.worktreeRoot !== null ? { worktreeRoot: resolve(command.worktreeRoot) } : {}),
+        ...(command.injections.length > 0 ? { injections: command.injections } : {}),
+        limitOverrides: overrides,
+        onProgress: display.receive,
+        configuration: { pipeline: resolved.pipeline, sources: resolved.sources, overrides: pipelineOverrides.values ?? [] },
+      };
+      const outcome = await runFeedbackStageFlow(request, {
+        budget: command.autoRetry, resumeFrom,
+      });
+      result = outcome.result;
+      autoRetryMeta = { rounds: outcome.rounds.length, stoppedBecause: outcome.stoppedBecause,
+        lastSession: outcome.rounds.at(-1)!.sessionId };
+    } catch (error) {
+      if (!(error instanceof StageFlowFinalizationError)) throw error;
+      result = error.result;
+    }
+    display.stop();
+    const declaredBuilds = result.declared?.declaredSet.builds.map((build) => build.id) ?? [];
+    const summary = {
+      state: result.state,
+      session: sessionId,
+      repo,
+      log_dir: result.logDir,
+      pipeline: resumeFrom !== null ? "resume (checkpoint restart)" : describePipeline(resolved.pipeline),
+      pipeline_layers: resolved.sources,
+      injected_stages: result.provenance.injected,
+      verification_authoritative: result.provenance.verification_authoritative,
+      ...(result.provenance.resume !== undefined ? { resumed_from: result.provenance.resume } : {}),
+      ...(autoRetryMeta !== null ? { auto_retry: autoRetryMeta } : {}),
+      declared_builds: declaredBuilds,
+      baseline_build: result.verification?.baselineBuild?.status ?? null,
+      candidate_build: result.verification?.candidateBuild?.status ?? null,
+      comparison: result.verification?.expectationComparison?.overall ??
+        result.verification?.comparison?.overall ?? null,
+      refactor_summary: result.refactorSummary.slice(0, 500),
+      ...(result.failure !== null
+        ? { failure: { stage: result.failure.stage, category: result.failure.category,
+            component: result.failure.component, reason: result.failure.reason, retryable: result.failure.retryable } }
+        : {}),
+      report: result.report,
     };
-  } else {
-    result = await runStageFlow(request);
+    if (command.format === "json") {
+      console.log(JSON.stringify(summary, null, 2));
+    } else {
+      const style = new TerminalStyle({ color: command.color, output: process.stdout });
+      console.log(formatRunReport(result.report, command.verbosity, { color: command.color, output: process.stdout }));
+      console.log(style.render([styled("pipeline: ", "accent"), summary.pipeline]));
+      for (const layer of resolved.sources) console.log(style.render([styled("pipeline layer: ", "accent"), layer]));
+      if (result.provenance.injected.length > 0) {
+        const authority = result.provenance.verification_authoritative
+          ? ""
+          : " (verification replaced: verdict is non-authoritative)";
+        console.log(style.render([styled("injected stages: ", "accent"), result.provenance.injected.join(", "), styled(authority, "warning")]));
+      }
+      if (declaredBuilds.length > 0) console.log(style.render([styled("declared builds: ", "accent"), declaredBuilds.join(", ")]));
+    }
+    return result.state === "ACCEPTED" && result.report.finalization_error === null ? 0 : 1;
+  } finally {
+    display.stop();
+    process.off("exit", onExit);
+    process.off("SIGINT", onInterrupt);
+    process.off("SIGTERM", onTerminate);
   }
-  const declaredBuilds = result.declared?.declaredSet.builds.map((build) => build.id) ?? [];
-  const summary = {
-    state: result.state,
-    session: sessionId,
-    repo,
-    log_dir: result.logDir,
-    pipeline: resumeFrom !== null ? "resume (checkpoint restart)" : describePipeline(resolved.pipeline),
-    pipeline_layers: resolved.sources,
-    injected_stages: result.provenance.injected,
-    verification_authoritative: result.provenance.verification_authoritative,
-    ...(result.provenance.resume !== undefined ? { resumed_from: result.provenance.resume } : {}),
-    ...(autoRetryMeta !== null ? { auto_retry: autoRetryMeta } : {}),
-    declared_builds: declaredBuilds,
-    baseline_build: result.verification?.baselineBuild?.status ?? null,
-    candidate_build: result.verification?.candidateBuild?.status ?? null,
-    comparison: result.verification?.expectationComparison?.overall ??
-      result.verification?.comparison?.overall ?? null,
-    refactor_summary: result.refactorSummary.slice(0, 500),
-    ...(result.failure !== null
-      ? {
-          failure: {
-            stage: result.failure.stage,
-            category: result.failure.category,
-            component: result.failure.component,
-            reason: result.failure.reason,
-            retryable: result.failure.retryable,
-          },
-        }
-      : {}),
-  };
-  if (command.format === "json") {
-    console.log(JSON.stringify(summary, null, 2));
-  } else {
-    console.log(`state: ${summary.state}`);
-    console.log(`session: ${sessionId}`);
-    console.log(`log: ${result.logDir}`);
-    console.log(`pipeline: ${summary.pipeline}`);
-    for (const layer of resolved.sources) console.log(`pipeline layer: ${layer}`);
-    if (result.provenance.resume !== undefined) {
-      console.log(
-        `resumed from: ${result.provenance.resume.source_session} (reused: ${result.provenance.resume.reused_stages.join(", ") || "none"})`,
-      );
-    }
-    if (autoRetryMeta !== null) {
-      console.log(
-        `auto retry: ${autoRetryMeta.rounds} rounds (${autoRetryMeta.stoppedBecause}); final session: ${autoRetryMeta.lastSession}`,
-      );
-    }
-    if (result.provenance.injected.length > 0) {
-      const authority = result.provenance.verification_authoritative
-        ? ""
-        : " (verification replaced: verdict is non-authoritative)";
-      console.log(`injected stages: ${result.provenance.injected.join(", ")}${authority}`);
-    }
-    if (declaredBuilds.length > 0) console.log(`declared builds: ${declaredBuilds.join(", ")}`);
-    if (result.failure !== null) {
-      console.log(
-        `failure: [${result.failure.category}] ${result.failure.stage}/${result.failure.component}` +
-          ` — ${result.failure.reason} (retryable: ${String(result.failure.retryable)})`,
-      );
-    }
-  }
-  return result.state === "ACCEPTED" ? 0 : 1;
 }
 
 async function executeWorkflowBuild(

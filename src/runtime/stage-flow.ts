@@ -62,6 +62,7 @@ import {
   type SessionLimits,
 } from "../config/limits.js";
 import type { LayerOverrides } from "../config/layers.js";
+import { RunReportCollector, type ProgressObserver, type RunConfiguration, type RunReport, type RunStage } from "./progress.js";
 
 /**
  * stage-flow — the pipeline as a flow of typed stages.
@@ -158,6 +159,9 @@ export interface StageFlowRequest {
   readonly limitOverrides?: LayerOverrides;
   readonly knownEnvironmentPatterns?: readonly RegExp[];
   readonly logger?: E2ELogger;
+  readonly onProgress?: ProgressObserver;
+  /** Optional entry-point configuration metadata for the durable run report. */
+  readonly configuration?: RunConfiguration;
   /** Stage implementations; omitted stages use the host defaults. */
   readonly flow?: StageFlow;
   /**
@@ -196,6 +200,7 @@ export interface StageProvenance {
 }
 
 export interface StageFlowResult {
+  readonly report: RunReport;
   readonly store: SessionStore;
   readonly state: string;
   readonly refactorSummary: string;
@@ -216,6 +221,14 @@ export interface StageFlowResult {
   /** Structured attribution of the abort; null unless the run aborted. */
   readonly failure: FailureReport | null;
   readonly logDir: string;
+}
+
+/** Preserve a completed gate verdict and evidence when final cleanup itself fails. */
+export class StageFlowFinalizationError extends Error {
+  constructor(readonly result: StageFlowResult, cause: unknown) {
+    super(`run finalization failed: ${errorMessage(cause)}`, { cause });
+    this.name = "StageFlowFinalizationError";
+  }
 }
 
 /** Everything a stage may read; run configuration plus host-owned accumulators. */
@@ -315,15 +328,18 @@ export interface StageFlow {
   readonly verify?: VerifyStage;
 }
 
+const hostVerificationStages = new WeakSet<VerifyStage>();
+
 /**
  * Run one complete pipeline: the host composes the stages, owns the state
  * machine, and measures everything that a verdict depends on.
  */
 export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResult> {
   const flow = req.flow ?? {};
+  const authoritativeVerify = flow.verify === undefined || hostVerificationStages.has(flow.verify);
   const provenance: StageProvenance = {
-    injected: STAGE_NAMES.filter((name) => flow[name] !== undefined),
-    verification_authoritative: flow.verify === undefined,
+    injected: STAGE_NAMES.filter((name) => name === "verify" ? !authoritativeVerify : flow[name] !== undefined),
+    verification_authoritative: authoritativeVerify,
     ...(req.resume !== undefined
       ? {
           resume: {
@@ -347,6 +363,9 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
     join(req.sessionRoot, ".refactor", "e2e"),
     req.sessionId,
   );
+  const collector = new RunReportCollector();
+  const unsubscribeReport = logger.subscribe((event) => collector.accept(event));
+  const unsubscribeProgress = req.onProgress ? logger.subscribe(req.onProgress) : () => {};
   logger.info(`limits resolved: ${describeLimits(limits)}`, {
     sources: limitSources,
     missing: missingLimitFiles,
@@ -382,208 +401,247 @@ export async function runStageFlow(req: StageFlowRequest): Promise<StageFlowResu
   let currentStage: StageName = "preflight";
   // Stage-completion facts for resume; rewritten after each completed stage.
   const checkpoints: StageCheckpoint[] = [];
-  const done = (): StageFlowResult =>
+  const done = (): Omit<StageFlowResult, "report"> =>
     result(store, logger, declared, verification, refactorSummary, refactorDialogueId, workflowsDialogueId, measuredPatch, provenance);
 
-  try {
-    const originalRepository = new TrackedRepositoryGuard(req.repoPath);
-    logger.phase("PREFLIGHT");
-    logger.artifact("stage-provenance.json", provenance);
-    if (provenance.injected.length > 0) {
-      logger.info("stage flow overrides active", {
-        injected: provenance.injected.join(", "),
-        verification_authoritative: provenance.verification_authoritative,
-        ...(provenance.resume !== undefined ? { resume: provenance.resume } : {}),
-      });
-    }
-    const preflight = await (flow.preflight ?? defaultPreflightStage)(ctx);
-    if (isHalt(preflight)) {
-      abort(orch, ctx, "preflight", preflight.reason, preflight.attribution);
-      return done();
-    }
-    if (preflight.project.status === "no-c-sources") {
-      abort(orch, ctx, "preflight", `project detection blocked: ${preflight.project.reason}`, {
-        category: "project",
-        component: "project-detection",
-        retryable: false,
-        detail: {
-          status: preflight.project.status,
-          reason: preflight.project.reason,
-          primary_build_system: preflight.project.primary_build_system ?? null,
-        },
-      });
-      return done();
-    }
-    currentStage = "workflows";
-
-    logger.phase("WORKFLOW_SESSION");
-    const workflows = await (flow.workflows ?? defaultWorkflowsStage)(ctx, {
-      preflight,
-    });
-    originalRepository.assertUnchanged("after workflow authoring");
-    if (isHalt(workflows)) {
-      abort(orch, ctx, "workflows", workflows.reason, workflows.attribution);
-      return done();
-    }
-    declared = workflows.declared;
-    if (workflows.dialogueId !== undefined) workflowsDialogueId = workflows.dialogueId;
-    checkpoints.push({ stage: "workflows", at: now(), data: workflowsCheckpointData(req.repoPath, workflows) });
-    saveStageCheckpoints(store, checkpoints);
-
-    currentStage = "prepare";
-    const prepared = await (flow.prepare ?? defaultPrepareStage)(ctx, { preflight, workflows });
-    if (isHalt(prepared)) {
-      abort(orch, ctx, "prepare", prepared.reason, prepared.attribution);
-      return done();
-    }
-    worktrees = prepared.worktrees;
-    const baselineRepository = new TrackedRepositoryGuard(worktrees.baselineDir);
-
-    currentStage = "refactor";
-    logger.phase("REFACTOR");
-    const refactored = await (flow.refactor ?? defaultRefactorStage)(ctx, {
-      preflight,
-      workflows,
-      candidate: prepared,
-    });
-    originalRepository.assertUnchanged("after candidate refactoring");
-    baselineRepository.assertUnchanged("after candidate refactoring");
-    if (isHalt(refactored)) {
-      abort(orch, ctx, "refactor", refactored.reason, refactored.attribution);
-      return done();
-    }
-    refactorSummary = refactored.summary;
-    if (refactored.dialogueId !== undefined) refactorDialogueId = refactored.dialogueId;
-    logger.artifact("refactor-summary.json", { summary: refactored.summary });
-    logger.info("refactor stage completed", { stage_source: flow.refactor === undefined ? "agent" : "injected" });
-
-    // The host measures the candidate itself: a stage reports a summary, never
-    // the change set, and a stage that changed nothing cannot reach verification.
-    const summaryLine = firstSummaryLine(refactored.summary) ?? req.task;
-    const changedFiles = commitCandidateChanges(prepared.worktrees.candidateDir, prepared.baseSha, summaryLine);
-    if (changedFiles.length === 0) {
-      abort(orch, ctx, "refactor", "refactor agent made no changes", {
-        category: "gate",
-        component: "change-set-measurement",
-        retryable: false,
-        detail: { branch: prepared.branch, base_sha: prepared.baseSha },
-      });
-      return done();
-    }
-    const patch: PatchFacts = {
-      branch: prepared.branch,
-      base_sha: prepared.baseSha,
-      commit_sha: gitIn(prepared.worktrees.candidateDir, ["rev-parse", "HEAD"]),
-      changed_files: changedFiles,
-      summary: summaryLine.slice(0, 500),
-    };
-    measuredPatch = patch;
-    logger.artifact("patch-candidate.json", patch);
-    // Refactor checkpoint: written only after the host measured the commit,
-    // so a resume never replays an unmeasured half-state. The dialogue id
-    // rides along so a feedback round can continue the SAME conversation.
-    checkpoints.push({
-      stage: "refactor",
-      at: now(),
-      data: {
-        branch: patch.branch,
-        base_sha: patch.base_sha,
-        commit_sha: patch.commit_sha,
-        summary: patch.summary,
-        ...(refactorDialogueId !== null ? { dialogue_id: refactorDialogueId } : {}),
-      },
-    });
-    saveStageCheckpoints(store, checkpoints);
-
-    // Judge material comes back only now: the candidate is committed (so the
-    // injection cannot appear in the measured change set) and the refactor
-    // session is over (so it never saw what it is judged by). The verification
-    // stage itself is untouched and stays authoritative.
-    const injectedFiles = new Map<string, IntegrityInput>();
-    if (req.injections !== undefined && req.injections.length > 0) {
-      const reports = applyInjections(
-        [prepared.worktrees.baselineDir, prepared.worktrees.candidateDir],
-        req.injections,
-      );
-      logger.artifact("injections.json", { injections: reports });
-      for (const report of reports) {
-        for (const file of report.files) injectedFiles.set(file.path, { path: file.path, sha256: file.sha256 });
-        logger.info("judge material injected", {
-          source: report.source,
-          dest: report.dest,
-          worktree: report.worktree,
-          files: report.files.length,
-          pre_existing: report.preExisting.length,
+  const execute = async (): Promise<Omit<StageFlowResult, "report">> => {
+    try {
+      const originalRepository = new TrackedRepositoryGuard(req.repoPath);
+      if (provenance.resume) logger.progress({ type: "resume", ...provenance.resume });
+      logger.phase("PREFLIGHT");
+      logger.artifact("stage-provenance.json", provenance);
+      if (provenance.injected.length > 0) {
+        logger.info("stage flow overrides active", {
+          injected: provenance.injected.join(", "),
+          verification_authoritative: provenance.verification_authoritative,
+          ...(provenance.resume !== undefined ? { resume: provenance.resume } : {}),
         });
       }
-    }
+      const preflight = await measureStage(logger, "preflight", () => (flow.preflight ?? defaultPreflightStage)(ctx));
+      if (isHalt(preflight)) {
+        abort(orch, ctx, "preflight", preflight.reason, preflight.attribution);
+        return done();
+      }
+      logger.progress({ type: "preflight", host: preflight.host, project: preflight.project });
+      if (preflight.project.status === "no-c-sources") {
+        abort(orch, ctx, "preflight", `project detection blocked: ${preflight.project.reason}`, {
+          category: "project",
+          component: "project-detection",
+          retryable: false,
+          detail: {
+            status: preflight.project.status,
+            reason: preflight.project.reason,
+            primary_build_system: preflight.project.primary_build_system ?? null,
+          },
+        });
+        return done();
+      }
+      currentStage = "workflows";
 
-    currentStage = "verify";
-    logger.phase("VERIFICATION");
-    if (declared === null || declared.buildResolutions.length === 0) {
-      abort(orch, ctx, "verify", "declared workflow resolution missing or empty build set", {
-        category: "resolution",
-        component: "declared-build-set",
-        retryable: false,
-        detail: { build_resolutions: declared?.buildResolutions.length ?? null },
+      logger.phase("WORKFLOW_SESSION");
+      const workflows = await measureStage(logger, "workflows", () => (flow.workflows ?? defaultWorkflowsStage)(ctx, {
+        preflight,
+      }));
+      originalRepository.assertUnchanged("after workflow authoring");
+      if (isHalt(workflows)) {
+        abort(orch, ctx, "workflows", workflows.reason, workflows.attribution);
+        return done();
+      }
+      declared = workflows.declared;
+      if (workflows.dialogueId !== undefined) workflowsDialogueId = workflows.dialogueId;
+      checkpoints.push({ stage: "workflows", at: now(), data: workflowsCheckpointData(req.repoPath, workflows) });
+      saveStageCheckpoints(store, checkpoints);
+
+      currentStage = "prepare";
+      logger.phase("PREPARE");
+      const prepared = await measureStage(logger, "prepare", () => (flow.prepare ?? defaultPrepareStage)(ctx, { preflight, workflows }));
+      if (isHalt(prepared)) {
+        abort(orch, ctx, "prepare", prepared.reason, prepared.attribution);
+        return done();
+      }
+      worktrees = prepared.worktrees;
+      logger.progress({ type: "workspace", branch: prepared.branch, base_sha: prepared.baseSha,
+        baseline_dir: worktrees.baselineDir, candidate_dir: worktrees.candidateDir });
+      const baselineRepository = new TrackedRepositoryGuard(worktrees.baselineDir);
+
+      currentStage = "refactor";
+      logger.phase("REFACTOR");
+      const refactored = await measureStage(logger, "refactor", () => (flow.refactor ?? defaultRefactorStage)(ctx, {
+        preflight,
+        workflows,
+        candidate: prepared,
+      }));
+      originalRepository.assertUnchanged("after candidate refactoring");
+      baselineRepository.assertUnchanged("after candidate refactoring");
+      if (isHalt(refactored)) {
+        abort(orch, ctx, "refactor", refactored.reason, refactored.attribution);
+        return done();
+      }
+      refactorSummary = refactored.summary;
+      if (refactored.dialogueId !== undefined) refactorDialogueId = refactored.dialogueId;
+      logger.artifact("refactor-summary.json", { summary: refactored.summary });
+      logger.info("refactor stage completed", { stage_source: flow.refactor === undefined ? "agent" : "injected" });
+
+      // The host measures the candidate itself: a stage reports a summary, never
+      // the change set, and a stage that changed nothing cannot reach verification.
+      const summaryLine = firstSummaryLine(refactored.summary) ?? req.task;
+      const changedFiles = commitCandidateChanges(prepared.worktrees.candidateDir, prepared.baseSha, summaryLine);
+      if (changedFiles.length === 0) {
+        abort(orch, ctx, "refactor", "refactor agent made no changes", {
+          category: "gate",
+          component: "change-set-measurement",
+          retryable: false,
+          detail: { branch: prepared.branch, base_sha: prepared.baseSha },
+        });
+        return done();
+      }
+      const patch: PatchFacts = {
+        branch: prepared.branch,
+        base_sha: prepared.baseSha,
+        commit_sha: gitIn(prepared.worktrees.candidateDir, ["rev-parse", "HEAD"]),
+        changed_files: changedFiles,
+        summary: summaryLine.slice(0, 500),
+      };
+      measuredPatch = patch;
+      logger.artifact("patch-candidate.json", patch);
+      logger.progress({ type: "candidate", candidate: patch });
+      // Refactor checkpoint: written only after the host measured the commit,
+      // so a resume never replays an unmeasured half-state. The dialogue id
+      // rides along so a feedback round can continue the SAME conversation.
+      checkpoints.push({
+        stage: "refactor",
+        at: now(),
+        data: {
+          branch: patch.branch,
+          base_sha: patch.base_sha,
+          commit_sha: patch.commit_sha,
+          summary: patch.summary,
+          ...(refactorDialogueId !== null ? { dialogue_id: refactorDialogueId } : {}),
+        },
+      });
+      saveStageCheckpoints(store, checkpoints);
+
+      // Judge material comes back only now: the candidate is committed (so the
+      // injection cannot appear in the measured change set) and the refactor
+      // session is over (so it never saw what it is judged by). The verification
+      // stage itself is untouched and stays authoritative.
+      const injectedFiles = new Map<string, IntegrityInput>();
+      if (req.injections !== undefined && req.injections.length > 0) {
+        const reports = applyInjections(
+          [prepared.worktrees.baselineDir, prepared.worktrees.candidateDir],
+          req.injections,
+        );
+        logger.artifact("injections.json", { injections: reports });
+        for (const report of reports) {
+          for (const file of report.files) injectedFiles.set(file.path, { path: file.path, sha256: file.sha256 });
+          logger.info("judge material injected", {
+            source: report.source,
+            dest: report.dest,
+            worktree: report.worktree,
+            files: report.files.length,
+            pre_existing: report.preExisting.length,
+          });
+        }
+      }
+
+      currentStage = "verify";
+      logger.phase("VERIFICATION");
+      if (declared === null || declared.buildResolutions.length === 0) {
+        abort(orch, ctx, "verify", "declared workflow resolution missing or empty build set", {
+          category: "resolution",
+          component: "declared-build-set",
+          retryable: false,
+          detail: { build_resolutions: declared?.buildResolutions.length ?? null },
+        });
+        return done();
+      }
+      logger.info("workflow verification started", { phase_detail: "all declared builds + observations on both sides" });
+      const verificationStarted = performance.now();
+      const verified = await measureStage(logger, "verify", () => (flow.verify ?? defaultVerifyStage)(ctx, {
+        preflight,
+        workflows,
+        candidate: prepared,
+        refactor: refactored,
+        patch,
+        injectedFiles: [...injectedFiles.values()],
+      }));
+      if (isHalt(verified)) {
+        abort(orch, ctx, "verify", verified.reason, verified.attribution);
+        return done();
+      }
+      verification = verified;
+      logger.info("workflow verification completed", {
+        duration_ms: Math.round(performance.now() - verificationStarted),
+      });
+      if (store.state === "ABORTED") {
+        // The verification pipeline aborted the session itself (build or test
+        // execution failure) with a plain reason on the store; attribute it here
+        // from the measured outcome. orch.abort must NOT run again: ABORTED is
+        // terminal (R7), so this persists the report only.
+        const reason = abortReason(store) ?? "workflow verification aborted";
+        persistFailureReport(ctx, "verify", reason, verificationAbortAttribution(verification));
+      }
+      return done();
+    } catch (error) {
+      const reason = errorMessage(error);
+      const info = error instanceof StageFailureError ? error.info : undefined;
+      abort(orch, ctx, currentStage, reason, {
+        category: info?.category ?? "internal",
+        component: info?.component ?? "stage-flow",
+        retryable: info?.retryable ?? false,
+        detail: info?.detail ?? {},
       });
       return done();
+    } finally {
+      logger.phase("CLEANUP");
+      await measureStage(logger, "cleanup", async () => {
+        timed(logger, "worktree cleanup", () => {
+          worktrees?.cleanup();
+        });
+        if (store.state === "ACCEPTED") {
+          await promoteRunLocalBuilds(declared, req.repoPath, logger);
+          logger.finish("accepted", "workflow verification accepted candidate");
+        }
+        else if (store.state === "REJECTED") logger.finish("rejected", "workflow verification rejected candidate");
+        else if (store.state === "ABORTED") {
+          // Every abort path records its reason on the session store, including the
+          // direct Orchestrator.abort calls that never touch the logger: read it
+          // back so the run journal states WHY the run stopped.
+          const reason = abortReason(store) ?? "workflow verification aborted";
+          logger.abort(reason);
+          logger.finish("aborted", reason);
+        }
+      });
+      logger.close();
     }
-    logger.info("workflow verification started", { phase_detail: "all declared builds + observations on both sides" });
-    const verificationStarted = performance.now();
-    const verified = await (flow.verify ?? defaultVerifyStage)(ctx, {
-      preflight,
-      workflows,
-      candidate: prepared,
-      refactor: refactored,
-      patch,
-      injectedFiles: [...injectedFiles.values()],
-    });
-    if (isHalt(verified)) {
-      abort(orch, ctx, "verify", verified.reason, verified.attribution);
-      return done();
+  };
+  try {
+    let completed: Omit<StageFlowResult, "report">;
+    let finalizationError: unknown;
+    try { completed = await execute(); }
+    catch (error) {
+      finalizationError = error;
+      completed = done();
+      logger.error(`run finalization failed: ${errorMessage(error)}`);
+      logger.finish("error", "run finalization failed; verification verdict retained in run-summary.json");
+      logger.close();
     }
-    verification = verified;
-    logger.info("workflow verification completed", {
-      duration_ms: Math.round(performance.now() - verificationStarted),
-    });
-    if (store.state === "ABORTED") {
-      // The verification pipeline aborted the session itself (build or test
-      // execution failure) with a plain reason on the store; attribute it here
-      // from the measured outcome. orch.abort must NOT run again: ABORTED is
-      // terminal (R7), so this persists the report only.
-      const reason = abortReason(store) ?? "workflow verification aborted";
-      persistFailureReport(ctx, "verify", reason, verificationAbortAttribution(verification));
-    }
-    return done();
-  } catch (error) {
-    const reason = errorMessage(error);
-    const info = error instanceof StageFailureError ? error.info : undefined;
-    abort(orch, ctx, currentStage, reason, {
-      category: info?.category ?? "internal",
-      component: info?.component ?? "stage-flow",
-      retryable: info?.retryable ?? false,
-      detail: info?.detail ?? {},
-    });
-    return done();
+    const report = collector.finish({ session: req.sessionId, repo: req.repoPath, task: req.task,
+      state: store.state, abort_reason: abortReason(store), failure: completed.failure, resume: provenance.resume ?? null,
+      decision_reason: [...store.history].reverse().find((entry) => entry.to === store.state)?.note ?? null,
+      finalization_error: finalizationError === undefined ? null : errorMessage(finalizationError),
+      elapsed_ms: logger.elapsedMs(), limits, limit_sources: limitSources,
+      limit_overrides: req.limitOverrides?.values ?? [], configuration: req.configuration ?? null,
+      refactor_summary: refactorSummary, log_dir: logger.runDir,
+      report_path: join(logger.artifactsDir, "run-summary.json") },
+      completed.declared?.declaredSet.builds.map((build) => build.id) ?? []);
+    logger.artifact("run-summary.json", report);
+    const finalized = { ...completed, report };
+    if (finalizationError !== undefined) throw new StageFlowFinalizationError(finalized, finalizationError);
+    return finalized;
   } finally {
-    timed(logger, "worktree cleanup", () => {
-      worktrees?.cleanup();
-    });
-    if (store.state === "ACCEPTED") {
-      await promoteRunLocalBuilds(declared, req.repoPath, logger);
-      logger.finish("accepted", "workflow verification accepted candidate");
-    }
-    else if (store.state === "REJECTED") logger.finish("rejected", "workflow verification rejected candidate");
-    else if (store.state === "ABORTED") {
-      // Every abort path records its reason on the session store, including the
-      // direct Orchestrator.abort calls that never touch the logger: read it
-      // back so the run journal states WHY the run stopped.
-      const reason = abortReason(store) ?? "workflow verification aborted";
-      logger.abort(reason);
-      logger.finish("aborted", reason);
-    }
-    logger.close();
+    unsubscribeProgress();
+    unsubscribeReport();
   }
 }
 
@@ -753,6 +811,7 @@ export const defaultRefactorStage: RefactorStage = async (ctx, input) => {
 export const defaultVerifyStage: VerifyStage = async (ctx, input) => {
   return runWorkflowVerification(verifyRequestOf(ctx, input));
 };
+hostVerificationStages.add(defaultVerifyStage);
 
 /**
  * A verify stage variant for feedback repair rounds: identical to the
@@ -765,7 +824,7 @@ export function verifyStageWithReuse(options: {
     readonly expectations: readonly import("./workflow-pipeline.js").ReusedExpectation[];
   };
 }): VerifyStage {
-  return async (ctx, input) => {
+  const verify: VerifyStage = async (ctx, input) => {
     const request = verifyRequestOf(ctx, input);
     return runWorkflowVerification({
       ...request,
@@ -774,6 +833,8 @@ export function verifyStageWithReuse(options: {
         : {}),
     });
   };
+  hostVerificationStages.add(verify);
+  return verify;
 }
 
 function verifyRequestOf(ctx: StageContext, input: VerifyStageInput): WorkflowVerificationRequest {
@@ -942,7 +1003,7 @@ function result(
   workflowsDialogueId: string | null,
   measuredPatch: PatchFacts | null,
   provenance: StageProvenance,
-): StageFlowResult {
+): Omit<StageFlowResult, "report"> {
   // Read the attribution back from the store instead of threading it through
   // locals: abort() persists synchronously, and this stays correct even for
   // aborts performed inside the verification pipeline.
@@ -960,6 +1021,16 @@ function result(
     failure,
     logDir: logger.runDir,
   };
+}
+
+async function measureStage<T>(logger: E2ELogger, name: RunStage, action: () => Promise<T>): Promise<T> {
+  logger.progress({ type: "stage", name, action: "start" });
+  let failed = true;
+  try {
+    const value = await action();
+    failed = isHalt(value) || (typeof value === "object" && value !== null && "state" in value && value.state === "ABORTED");
+    return value;
+  } finally { logger.progress({ type: "stage", name, action: "end", failed }); }
 }
 
 /** First non-empty line of a stage summary, used as the commit subject. */

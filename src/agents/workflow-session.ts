@@ -248,7 +248,8 @@ export async function runWorkflowSession(
     join(repoDir, ".refactor", "runs", options.sessionId, "workflows", "verification-analysis.json"),
     options.task,
   );
-  const mcpServer = createDependencyMcpServer({ registry, verificationAnalysis });
+  const mcpServer = createDependencyMcpServer({ registry, verificationAnalysis,
+    onVerificationAnalysis: ({ path, report }) => options.logger?.progress?.({ type: "strategy", path, report }) });
   const serverName = "dep-registry";
   const mcpToolPrefix = `mcp__${serverName}__`;
   const mcpTools = [
@@ -374,6 +375,7 @@ async function defaultRunAgent(
   o: WorkflowSessionAgentOptions,
 ): Promise<DriverRun> {
   return runAgent({
+    role: "test-writer",
     cwd: o.cwd,
     prompt: o.prompt,
     systemPrompt: o.systemPrompt,

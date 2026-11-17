@@ -85,6 +85,7 @@ export function continuedRefactorStage(spec: {
       cwd: input.candidate.worktrees.candidateDir,
       prompt: spec.feedback,
       allowedTools: [...REFACTOR_AGENT_TOOLS],
+      logger: ctx.logger, role: "refactor",
       // Resume reads the stored conversation from ROUND 1's store root; the
       // continuation appends to the same durable transcript.
       sessionStore: new FileSessionStore(spec.dialogueRoot),
@@ -200,6 +201,7 @@ export async function runBuildWriterRepairSession(options: {
   readonly host: unknown;
   readonly project: unknown;
   readonly brief: string;
+  readonly dialogueRoot: string;
   readonly logger?: Parameters<typeof runAgent>[0]["logger"];
   readonly limits?: { maxTurns?: number | null; model?: string | null; deadlineMs?: number | null; stallMs?: number | null };
 }): Promise<{ id: string; entry: string } | null> {
@@ -234,6 +236,8 @@ export async function runBuildWriterRepairSession(options: {
       timeoutMs: options.limits?.deadlineMs ?? undefined,
       stallTimeoutMs: options.limits?.stallMs ?? null,
       logger: options.logger,
+      role: "build-repair",
+      sessionStore: new FileSessionStore(options.dialogueRoot),
     });
   } finally {
     verificationAnalysis.close();

@@ -4,7 +4,7 @@ import type { StageFlowResult, WorkflowsStage } from "../stage-flow.js";
 import type { ReusedExpectation } from "../workflow-pipeline.js";
 import { classifyFailureOwner, routeFailure, type RouterInput } from "./router.js";
 import { composeRefactorFeedback } from "./repair.js";
-import type { FeedbackDecision, RepairEvidence } from "./types.js";
+import type { FeedbackDecision, FeedbackUpdate, FeedbackStopReason, FeedbackLane, RepairEvidence } from "./types.js";
 import { freshFeedbackState, loadFeedbackState, saveFeedbackState } from "./state.js";
 import type { FeedbackState } from "./types.js";
 
@@ -32,8 +32,8 @@ export interface FeedbackLoopConfig {
   readonly baseTask: string;
   /** Total repair attempts allowed (the initial round is not counted). */
   readonly budget: number;
-  /** Plain-language progress and final notices (stderr at the CLI). */
-  readonly notify: (message: string) => void;
+  /** Optional structured activity, independent of terminal rendering. */
+  readonly onFeedback?: (update: FeedbackUpdate) => void;
   /** Round 1: the normal full run (AI workflows, AI refactor, verify). */
   readonly runInitial: () => Promise<StageFlowResult>;
   /** Load the current pinned exam so refactor/build repair rounds run the
@@ -119,15 +119,7 @@ export interface FeedbackRoundOutcome {
 export interface FeedbackLoopOutcome {
   readonly result: StageFlowResult;
   readonly rounds: readonly FeedbackRoundOutcome[];
-  readonly stoppedBecause:
-    | "accepted"
-    | "budget-exhausted"
-    | "no-progress"
-    | "routed-stop"
-    | "repair-failed"
-    | "missing-dialogue"
-    | "missing-patch"
-    | "missing-input";
+  readonly stoppedBecause: FeedbackStopReason;
   /** The router's stop decision, when stoppedBecause is "routed-stop". */
   readonly stopDetail: string | null;
 }
@@ -265,38 +257,42 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
     failureSignature: result.state === "ACCEPTED" ? null : failureSignatureOf(result),
   });
 
-  // ---- Round 1: the initial execution (not budgeted) ----
-  config.notify(`第 ${String(firstRound)} 轮执行开始。`);
-  config.onRoundStarted?.(config.sessionIdFor(firstRound));
+  const startRound = (round: number, session: string, repair: FeedbackLane | null): void => {
+    config.onFeedback?.({ action: "round-start", round, session, repair });
+    config.onRoundStarted?.(session);
+  };
+  const endRound = (round: number, session: string, measured: StageFlowResult): void => {
+    config.onRoundCompleted?.(session, measured);
+    config.onFeedback?.({ action: "round-end", round, session, state: measured.state,
+      reason: measured.failure?.reason ?? measured.verification?.expectationComparison?.reason ?? null,
+      log_dir: measured.logDir });
+  };
+  const finish = (reason: FeedbackStopReason, detail: string | null = null): FeedbackLoopOutcome => {
+    config.onFeedback?.({ action: "stop", reason, detail, budget_total: config.budget, budget_used: budgetUsed });
+    return { result, rounds, stoppedBecause: reason, stopDetail: detail };
+  };
+  const beginRepair = (round: number, session: string, lane: FeedbackLane, evidence: RepairEvidence,
+    dialogueId: string | null = null, reuseBaseline = false): void => {
+    config.onFeedback?.({ action: "repair-start", round, session, lane, evidence,
+      dialogue_id: dialogueId, reuse_baseline: reuseBaseline, budget_total: config.budget, budget_used: budgetUsed });
+  };
+
+  startRound(firstRound, config.sessionIdFor(firstRound), null);
   let result = await config.runInitial();
-  config.onRoundCompleted?.(config.sessionIdFor(firstRound), result);
+  endRound(firstRound, config.sessionIdFor(firstRound), result);
   let record = evaluate(firstRound, config.sessionIdFor(firstRound), result);
   rounds.push(record);
   persist(record, result, null);
 
   while (true) {
-    if (result.state === "ACCEPTED") {
-      if (rounds.length > 1) {
-        config.notify(`第 ${String(record.round)} 轮通过验收（ACCEPTED）——反馈修复起效，循环结束。`);
-      }
-      return { result, rounds, stoppedBecause: "accepted", stopDetail: null };
-    }
+    if (result.state === "ACCEPTED") return finish("accepted");
 
     const decision = routeFailure(routerInputOf(result));
 
     if (decision.kind === "stop" || decision.kind === "needs-diagnosis") {
-      config.notify(
-        decision.kind === "stop"
-          ? `循环停止（${decision.reason}）：${decision.detail}`
-          : `循环停止（无法分类）：${decision.detail}`,
-      );
-      return { result, rounds, stoppedBecause: "routed-stop", stopDetail: decision.detail };
+      return finish("routed-stop", decision.detail);
     }
-
-    if (budgetUsed >= config.budget) {
-      config.notify(`反馈预算已用完（${String(config.budget)} 次）；保留最后一轮真实结果。`);
-      return { result, rounds, stoppedBecause: "budget-exhausted", stopDetail: null };
-    }
+    if (budgetUsed >= config.budget) return finish("budget-exhausted");
 
     // No-progress brake: identical artifact AND identical failure twice.
     const previous = rounds.at(-2);
@@ -308,10 +304,7 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       previous.artifactHash === current.artifactHash &&
       previous.failureSignature === current.failureSignature
     ) {
-      config.notify(
-        "连续两轮的修复产物与失败签名完全相同——我判断对话已陷入循环，主动停止以免继续消耗额度。",
-      );
-      return { result, rounds, stoppedBecause: "no-progress", stopDetail: null };
+      return finish("no-progress");
     }
 
     const round = firstRound + rounds.length;
@@ -325,17 +318,14 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       const dialogueId = result.refactorDialogueId ?? persisted.dialogues.refactor ?? null;
       const patch = result.patch;
       if (dialogueId === null) {
-        config.notify("本轮没有可续写的重构对话句柄（会话未上报对话编号）；无法续写，停止。");
-        return { result, rounds, stoppedBecause: "missing-dialogue", stopDetail: null };
+        return finish("missing-dialogue", "没有可继续的原重构对话编号。");
       }
       if (patch === null) {
-        config.notify("本轮没有宿主测量过的候选提交（patch 为空）；无法确定修复基线，停止。");
-        return { result, rounds, stoppedBecause: "missing-patch", stopDetail: null };
+        return finish("missing-patch", "尚未记录候选提交，无法确定从哪里继续修复。");
       }
       const pinnedWorkflows = config.loadPinnedWorkflows();
       if (pinnedWorkflows === null) {
-        config.notify("无法加载当前有效的验证方案——换新考卷会破坏轮间可比性，我停止了循环。");
-        return { result, rounds, stoppedBecause: "missing-patch", stopDetail: "pinned-exam-unavailable" };
+        return finish("missing-patch", "当前验证方案不可用，无法用相同方案重新验证。");
       }
       // Baseline reuse: every refactor-lane trigger (candidate build/crash,
       // behavior mismatch) implies the baseline side PASSED under this exact
@@ -359,23 +349,16 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       };
       budgetUsed += 1;
       persistBudget();
-      config.notify(
-        `第 ${String(round)} 轮反馈修复开始：我向原重构对话追加了失败证据（${decision.trigger}），` +
-          `沿用当前验证方案，从候选分支 ${patch.branch} 继续施工` +
-          (reusedBaseline !== null ? "，基线观测按守卫复用" : "") +
-          `。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
-      );
+      beginRepair(round, sessionId, "refactor", decision.evidence, dialogueId, reusedBaseline !== null);
     } else if (decision.kind === "repair-test") {
       const dialogueId = result.workflowsDialogueId ?? persisted.dialogues.testWriter ?? null;
       const testEntry = config.locateExamEntry();
       const patch = result.patch;
       if (dialogueId === null || testEntry === null) {
-        config.notify("考卷对话句柄或考卷路径不可用，无法续写出题对话；停止。");
-        return { result, rounds, stoppedBecause: "missing-input", stopDetail: null };
+        return finish("missing-input", "原测试编写对话编号或测试脚本路径不可用。");
       }
       if (patch === null) {
-        config.notify("本轮没有宿主测量过的候选提交（patch 为空）；无法保留候选分支，停止。");
-        return { result, rounds, stoppedBecause: "missing-patch", stopDetail: null };
+        return finish("missing-patch", "尚未记录候选提交，无法保留已完成的改动。");
       }
       const feedback = composeTestFeedback(decision.evidence, { round, testEntry });
       context = {
@@ -390,37 +373,31 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
       };
       budgetUsed += 1;
       persistBudget();
-      config.notify(
-        `第 ${String(round)} 轮反馈修复开始：考卷脚本自身出错，我向原出题对话追加了错误证据；` +
-          `两侧将在修复后的同一版考卷下重新验证。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
-      );
+      beginRepair(round, sessionId, "test", decision.evidence, dialogueId);
     } else {
       // decision.kind === "repair-build"
       const patch = result.patch;
       if (patch === null) {
-        config.notify("本轮没有宿主测量过的候选提交（patch 为空）；无法保留候选分支，停止。");
-        return { result, rounds, stoppedBecause: "missing-patch", stopDetail: null };
+        return finish("missing-patch", "尚未记录候选提交，无法保留已完成的改动。");
       }
       const brief = config.composeBuildBrief(decision.evidence, round);
       if (brief === null) {
-        config.notify("无法组装构建修复简报（检查点不可用）；停止。");
-        return { result, rounds, stoppedBecause: "missing-input", stopDetail: null };
+        return finish("missing-input", "缺少已保存的构建方案，无法提供修复所需信息。");
       }
       // Consume the budget unit BEFORE dispatching the repair session: a
       // session that tries and fails (or a run interrupted mid-repair) has
       // still spent the attempt, and the durable state must say so.
       budgetUsed += 1;
       persistBudget();
-      config.notify(`第 ${String(round)} 轮构建方案修复开始：我派出了构建修理工。`);
+      beginRepair(round, sessionId, "build", decision.evidence);
       const fixed = await config.runBuildRepair(brief, round);
       if (fixed === null) {
-        config.notify("构建修理工没有交付可用的修复方案（环境问题或无法修复）；停止并保留证据。");
-        return { result, rounds, stoppedBecause: "repair-failed", stopDetail: null };
+        return finish("repair-failed", "构建修复会话没有交付可用的修复方案；已保留证据。");
       }
+      config.onFeedback?.({ action: "build-repaired", round, build_id: fixed.id });
       const pinnedWorkflows = config.loadPinnedWorkflows();
       if (pinnedWorkflows === null) {
-        config.notify("无法加载当前有效的验证方案；构建修复后无法保持考卷一致，停止。");
-        return { result, rounds, stoppedBecause: "missing-patch", stopDetail: "pinned-exam-unavailable" };
+        return finish("missing-patch", "构建方案已修复，但当前测试方案不可用，无法重新验证。");
       }
       context = {
         lane: "build",
@@ -431,14 +408,11 @@ export async function runFeedbackLoop(config: FeedbackLoopConfig): Promise<Feedb
         pinnedWorkflows,
         sessionId,
       };
-      config.notify(
-        `构建修理工交付了修复方案 ${fixed.id}；两侧将重新构建并重新验证。剩余预算 ${String(config.budget - budgetUsed)} 次。`,
-      );
     }
 
-    config.onRoundStarted?.(sessionId);
+    startRound(round, sessionId, context.lane);
     result = await config.runRepairRound(round, context);
-    config.onRoundCompleted?.(sessionId, result);
+    endRound(round, sessionId, result);
     record = evaluate(round, sessionId, result);
     rounds.push(record);
     persist(record, result, context.lane);

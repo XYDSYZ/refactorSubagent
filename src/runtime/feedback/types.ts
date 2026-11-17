@@ -153,3 +153,21 @@ export interface FeedbackState {
   readonly dialogues: DialogueHandles;
   rounds: FeedbackRoundRecord[];
 }
+
+/** Structured feedback activity; presentation belongs to the consumer. */
+export type FeedbackLane = "refactor" | "test" | "build";
+export type FeedbackStopReason =
+  | "accepted" | "budget-exhausted" | "no-progress" | "routed-stop"
+  | "repair-failed" | "missing-dialogue" | "missing-patch" | "missing-input";
+export type FeedbackUpdate =
+  | { readonly action: "start"; readonly owner_session: string; readonly resumed_from: string | null;
+      readonly budget_total: number; readonly budget_used: number; readonly state_dir: string }
+  | { readonly action: "round-start"; readonly round: number; readonly session: string; readonly repair: FeedbackLane | null }
+  | { readonly action: "round-end"; readonly round: number; readonly session: string; readonly state: string;
+      readonly reason: string | null; readonly log_dir: string }
+  | { readonly action: "repair-start"; readonly round: number; readonly session: string; readonly lane: FeedbackLane;
+      readonly evidence: RepairEvidence; readonly budget_total: number; readonly budget_used: number;
+      readonly dialogue_id: string | null; readonly reuse_baseline: boolean }
+  | { readonly action: "build-repaired"; readonly round: number; readonly build_id: string }
+  | { readonly action: "stop"; readonly reason: FeedbackStopReason | "finalization-error"; readonly detail: string | null;
+      readonly budget_total: number; readonly budget_used: number };
