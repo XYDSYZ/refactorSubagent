@@ -186,7 +186,7 @@ export class Workbench {
     if (changed) this.detail.stickyScroll = detail.follow === true;
     this.detail.scrollTop = position;
   }
-  private async openSelected(): Promise<void> {
+  async openSelected(): Promise<void> {
     const item = this.currentItem();
     if (item?.activate) await this.perform(item.activate);
     else { this.narrowDetail = true; this.resize(); this.detail.focus(); }

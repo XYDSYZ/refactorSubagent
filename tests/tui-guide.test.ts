@@ -1,51 +1,44 @@
 import { describe, expect, test } from "bun:test";
-import { guideSection } from "../src/cli/tui/guide.js";
+import { parseCliArgs } from "../src/cli/args.js";
+import { CliInputCancelled } from "../src/cli/input.js";
+import { LaunchWizard } from "../src/cli/tui/configure.js";
+import { chooseLaunchTask } from "../src/cli/tui/home.js";
+import { terminal } from "./tui-helpers.js";
 
-/**
- * TUI 使用指引分区：裸启动（无参数进 TUI）后，第一屏就能看到
- * 任务指引（每个功能的中英对照）、参数指引（每个参数填什么）、流程说明。
- */
+describe("OpenTUI guide before starting", () => {
+  test("a user can read the guide before choosing a task and return to the picker", async () => {
+    const t = await terminal();
+    const picked = chooseLaunchTask(t.ui).catch(error => error);
+    try {
+      expect(await t.frame()).toContain("使用指引");
+      t.mockInput.pressKey("2");
+      expect(await t.frame()).toContain("bun scripts/cli.ts run");
+      t.mockInput.pressArrow("down");
+      expect(await t.frame()).toContain("--scope");
 
-describe("guideSection — TUI 使用指引", () => {
-  const section = guideSection();
-
-  test("分区挂载在最前，标题与条目齐全", () => {
-    expect(section.id).toBe("guide");
-    expect(section.title).toContain("使用指引");
-    expect(section.items()).toHaveLength(3);
-    expect(section.items().map((item) => item.id)).toEqual([
-      "guide-tasks",
-      "guide-params",
-      "guide-flow",
-    ]);
+      t.mockInput.pressKey("1");
+      t.mockInput.pressArrow("down");
+      t.mockInput.pressEnter();
+      expect(await picked).toBe("prepare");
+    } finally { t.ui.onCancel(); await t.close(); }
   });
 
-  test("任务指引：四大功能的中英对照齐全", async () => {
-    const detail = await section.items()[0]!.detail();
-    const text = detail.paragraphs.map((p) => p.text).join("\n");
-    expect(text).toContain("tests prepare / tests review 命令"); // 测试文件用
-    expect(text).toContain("run 命令"); // 重构文件用
-    expect(text).toContain("workflow list 命令"); // 方案库
-    expect(text).toContain("preflight 命令"); // 机器体检
-    expect(detail.title).toContain("任务指引");
-  });
+  test("the configuration guide is reachable with a narrow terminal and no task entered", async () => {
+    const command = parseCliArgs(["run"], true);
+    if (command.kind !== "run") throw new Error("run required");
+    const t = await terminal(65, 24);
+    const pending = new LaunchWizard(t.ui, command, {}, {}).run().catch(error => error);
+    try {
+      expect(await t.frame()).toContain("7 使用指引");
+      t.mockInput.pressKey("7");
+      t.mockInput.pressEnter();
+      expect(await t.frame()).toContain("bun scripts/cli.ts run");
 
-  test("参数指引：每个参数的含义与示例齐全", async () => {
-    const detail = await section.items()[1]!.detail();
-    const text = detail.paragraphs.map((p) => p.text).join("\n");
-    expect(text).toContain("仓库路径"); // 填路径
-    expect(text).toContain("--task <任务描述>");
-    expect(text).toContain("--auto-retry <次数>");
-    expect(text).toContain("--resume <会话id>");
-    expect(text).toContain("--scope <行为描述>");
-    expect(text).toContain("--from <方案目录>");
-  });
-
-  test("流程说明：六阶段与反馈修复讲清楚", async () => {
-    const detail = await section.items()[2]!.detail();
-    const text = detail.paragraphs.map((p) => p.text).join("\n");
-    expect(text).toContain("六阶段");
-    expect(text).toContain("REJECTED");
-    expect(text).toContain("反馈");
+      t.mockInput.pressEscape();
+      t.mockInput.pressKey("1");
+      expect(await t.frame()).toContain("重构需求");
+      t.mockInput.pressKey("q");
+      expect(await pending).toBeInstanceOf(CliInputCancelled);
+    } finally { t.ui.onCancel(); await t.close(); }
   });
 });

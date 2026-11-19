@@ -484,7 +484,7 @@ INPUT comes from is configuration (see "Stage sources" below); by default every
 authoring/refactor stage is AI-driven.
 
 Interactive terminal UI (OpenTUI; Windows and Linux):
-  No arguments               Choose run, prepare tests or review a saved plan
+  No arguments               Choose run, prepare tests, review a saved plan or read the guide
   --ui auto                  TUI for interactive stdin/stderr; plain in CI/JSON (default)
   --ui tui                   Require the TUI; incompatible with --progress plain/off
   --ui plain                 Ordinary text, including the existing task prompt

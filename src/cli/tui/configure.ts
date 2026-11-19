@@ -8,6 +8,7 @@ import type { LayerOverrides } from "../../config/layers.js";
 import type { RunCommand, TestsCommand } from "../args.js";
 import { CliInputCancelled } from "../input.js";
 import { loadTestPlan } from "../../testing/bundle.js";
+import { guideSection } from "./guide.js";
 import { Workbench, type Item, type Section } from "./workbench.js";
 
 export type LaunchCommand = RunCommand | TestsCommand;
@@ -181,15 +182,15 @@ export class LaunchWizard {
         { text: failure ?? "必填项和配置校验通过。", tone: failure ? "error" : "success" },
         { text: this.notice, tone: "muted" }, { text: "可导出本次完整配置及启动命令，之后从终端直接复用。", tone: "muted" },
       ], code: JSON.stringify(command.kind === "run" ? { pipeline: this.pipeline, limits: this.limits } : { limits: this.limits }, null, 2) }) }],
-    } satisfies Section];
+    } satisfies Section, guideSection()];
     this.ui.setSections(sections);
     // Keep the selected field after edits, including fields revealed by a mode switch.
     if (selected) { const sectionIndex = sections.findIndex(entry => entry.items().some(item => item.id === selected)); if (sectionIndex >= 0) { this.ui.selectSection(sectionIndex); this.ui.selectItem(sections[sectionIndex]!.items().findIndex(item => item.id === selected)); } }
     this.ui.setStatus("尚未创建运行会话，也未调用 AI。");
-    this.ui.setActions([{ id: "edit", label: "编辑选中项", run: () => this.ui.currentItem()?.activate?.() },
+    this.ui.setActions([{ id: "edit", label: "打开选中项", run: () => this.ui.openSelected() },
       { id: "save", label: "保存项目默认", run: () => this.saveProject() }, { id: "export", label: "导出启动命令", run: () => this.exportLaunch() }, { id: "start", label: "开始", tone: "success", run: () => this.start() },
       { id: "cancel", label: "取消", tone: "muted", run: () => this.done.reject(new CliInputCancelled()) }]);
-    this.ui.setNotice("Enter 编辑 · Tab 切换区域 · 1–6 切换分组");
+    this.ui.setNotice(`Enter 打开 · ${sections.length} 使用指引 · Tab 切换焦点`);
   }
   validate(requireTask = true): string | null {
     try {

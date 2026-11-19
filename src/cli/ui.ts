@@ -1,5 +1,5 @@
 import { CliUsageError, parseCliArgs, type CliCommand, type RunCommand, type TestsCommand } from "./args.js";
-import { CliInputCancelled, resolveCliInput } from "./input.js";
+import { resolveCliInput } from "./input.js";
 import type { LayerOverrides } from "../config/layers.js";
 import type { Workbench } from "./tui/workbench.js";
 
@@ -37,12 +37,8 @@ export async function prepareCliLaunch(argv: readonly string[], limits: LayerOve
   try {
     workbench.onCancel = () => { void workbench.close(); };
     if (home) {
-      const kind = await workbench.choose("Refactor Subagent · 选择任务", [
-        { label: "全流程重构", value: "run", description: "编写或复用测试，重构代码并比较两侧行为" },
-        { label: "准备测试", value: "prepare", description: "编写测试，在原版试跑，审阅后保存或继续重构" },
-        { label: "打开测试方案", value: "review", description: "审阅已保存方案、提出修改或再次试跑" },
-      ]);
-      if (!kind) throw new CliInputCancelled();
+      const { chooseLaunchTask } = await import("./tui/home.js");
+      const kind = await chooseLaunchTask(workbench);
       command = parseCliArgs(kind === "run" ? ["run"] : ["tests", kind], true);
     }
     if (command.kind !== "run" && command.kind !== "tests") throw new Error("launcher must resolve to run or tests");

@@ -87,7 +87,9 @@ export class RunScreen {
   start(startup: RunStartup): void {
     this.startup = startup; this.ui.setTitle(`全流程重构 · ${startup.session}`);
     this.rounds.set(1, { number: 1, session: startup.session, state: "进行中", reason: null });
-    this.ui.setSections(this.sections()); this.ui.onExit = () => { void this.requestExit(); };
+    const sections = this.sections();
+    this.ui.setSections(sections); this.ui.onExit = () => { void this.requestExit(); };
+    this.ui.setNotice(`Tab 切换焦点 · ${sections.length} 使用指引 · Q 退出`);
     this.ui.onCancel = () => { process.emit("SIGINT"); };
     this.ui.onFollow = () => this.ui.follow();
     this.actions(); this.timer = setInterval(() => this.updateStatus(), 1000); this.timer.unref(); this.updateStatus();
