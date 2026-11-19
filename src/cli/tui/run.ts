@@ -7,6 +7,7 @@ import { duration, PHASES, ROLES, STAGES, STRATEGIES, FEEDBACK_STOPS, REPAIR_LAB
 import { cleanText } from "../terminal.js";
 import type { FeedbackLane } from "../../runtime/feedback/types.js";
 import { toolPresentation } from "../tool-presentation.js";
+import { guideSection } from "./guide.js";
 import { Workbench, type Detail, type Item, type Section } from "./workbench.js";
 
 const git = promisify(execFile);
@@ -194,6 +195,7 @@ export class RunScreen {
           ...(this.report?.feedback ? [{ text: `已用修复次数：${this.report.feedback.budget_used}/${this.report.feedback.budget_total}\n停止原因：${this.report.feedback.stop_detail ?? this.report.feedback.stopped_because}` }] : []),
         ] }) })) },
       { id: "settings", title: "运行设置", items: () => this.settings() },
+      guideSection(),
     ];
   }
   private overview(): Item[] {
