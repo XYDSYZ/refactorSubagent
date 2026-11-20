@@ -37,13 +37,28 @@ export async function prepareCliLaunch(argv: readonly string[], limits: LayerOve
   try {
     workbench.onCancel = () => { void workbench.close(); };
     if (home) {
-      const { chooseLaunchTask } = await import("./tui/home.js");
-      const kind = await chooseLaunchTask(workbench);
-      command = parseCliArgs(kind === "run" ? ["run"] : ["tests", kind], true);
+      // 裸启动：主菜单 ⇄ 配置向导可往返；只有主菜单取消才离开程序。
+      for (;;) {
+        const { chooseLaunchTask } = await import("./tui/home.js");
+        const kind = await chooseLaunchTask(workbench);
+        command = parseCliArgs(kind === "run" ? ["run"] : ["tests", kind], true);
+        if (command.kind !== "run" && command.kind !== "tests") throw new Error("launcher must resolve to run or tests");
+        const incomplete = command.kind === "run" ? !command.task.trim() : command.action === "prepare" ? !command.scope?.trim() : command.from === null;
+        if (!incomplete && !command.configure) return { command, limitOverrides: limits, pipelineOverrides: pipeline, workbench };
+        try {
+          const { LaunchWizard } = await import("./tui/configure.js");
+          const configured = await new LaunchWizard(workbench, command, limits, pipeline).run();
+          return { ...configured, workbench };
+        } catch (error) {
+          if (!(error instanceof CliInputCancelled)) throw error;
+          // 配置向导取消 → 回到主菜单，让用户换个方向重新开始。
+        }
+      }
     }
+    // 显式参数启动：保持原语义（配置向导取消 = 放弃本次运行）。
     if (command.kind !== "run" && command.kind !== "tests") throw new Error("launcher must resolve to run or tests");
     const incomplete = command.kind === "run" ? !command.task.trim() : command.action === "prepare" ? !command.scope?.trim() : command.from === null;
-    if (home || command.configure || incomplete) {
+    if (command.configure || incomplete) {
       const { LaunchWizard } = await import("./tui/configure.js");
       const configured = await new LaunchWizard(workbench, command, limits, pipeline).run();
       return { ...configured, workbench };

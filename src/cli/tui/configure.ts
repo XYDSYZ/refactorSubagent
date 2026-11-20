@@ -102,11 +102,16 @@ export class LaunchWizard {
   private build(): void {
     const command = this.command;
     const basic: Field[] = [this.path("repo", "目标仓库", () => command.repo, text => {
-      if (!existsSync(text) || !statSync(text).isDirectory()) throw new Error("请选择存在的仓库目录");
-      const previous = command.repo; command.repo = resolve(text);
+      // 相对路径以启动命令时所在的目录为基准；报错时把解析结果亮出来，
+      // 让"填到哪里去了"一目了然，而不是让用户对着静默失败猜。
+      const resolvedText = resolve(text);
+      if (!existsSync(resolvedText) || !statSync(resolvedText).isDirectory()) {
+        throw new Error(`仓库目录不存在：${text}\n（相对路径按启动目录解析为 ${resolvedText}；当前目录：${process.cwd()}）`);
+      }
+      const previous = command.repo; command.repo = resolvedText;
       try { const next = this.resolveConfiguration(); this.limits = next.limits; this.pipeline = next.pipeline; }
       catch (error) { command.repo = previous; throw error; }
-    }, "directory", "选择 Git 仓库；更换仓库后重新加载该项目的配置。")];
+    }, "directory", "选择 Git 仓库；支持相对路径（按启动目录解析）与绝对路径；更换仓库后重新加载该项目的配置。")];
     if (command.kind === "run") basic.push(this.text("task", "重构需求", () => command.task, text => { command.task = text; }, "描述希望进行的重构；启动前必须填写。", true));
     else if (command.action === "prepare") basic.push(this.text("scope", "测试保护范围", () => command.scope ?? "", text => { command.scope = text; }, "描述需要保护的模块、行为和边界条件。", true));
     else basic.push(this.path("from", "已保存测试方案", () => command.from ?? "", text => { command.from = text; }, "directory", "选择包含 plan.json 的方案版本目录。"));
