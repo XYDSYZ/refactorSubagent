@@ -24,7 +24,7 @@ describe("OpenTUI full run presentation", () => {
       const builds = screen.sections().find(section => section.id === "execution")!.items();
       expect(builds.filter(item => item.label.includes("构建"))).toHaveLength(4);
       expect(builds.every(item => item.description!.includes("未执行"))).toBeTrue();
-      const stages = screen.sections()[0]!.items();
+      const stages = screen.sections().find(section => section.id === "overview")!.items();
       expect((await stages.find(item => item.id === "stage/1/verify")!.detail()).paragraphs.map(p => p.text).join("\n")).toContain("未执行");
       if (state === "ABORTED") expect(await t.frame()).toContain("缺少必需产物");
       await t.activate("action:exit"); await finished;

@@ -23,6 +23,30 @@ async function field(t: Awaited<ReturnType<typeof terminal>>, id: string): Promi
 }
 
 describe("OpenTUI launch configuration", () => {
+  test("repo 字段接受相对路径，失败时展示解析基准与当前目录", async () => {
+    const repo = repository(); const t = await terminal(120, 38);
+    const wizard = new LaunchWizard(t.ui, command(repo), {}, {}); const running = wizard.run();
+    try {
+      // 路径字段回车打开目录浏览器，默认选中第一项「输入路径」。
+      await field(t, "repo");
+      await t.mockInput.pressEnter(); await t.frame();
+      await t.mockInput.pressKey("a", { ctrl: true }); await t.mockInput.pressKey("k", { ctrl: true });
+      await t.mockInput.pasteBracketedText("missing-relative-dir");
+      await t.activate("dialog:submit"); await t.frame();
+      // 校验失败：弹窗保持打开，错误显示在弹窗内（含解析基准与当前目录）。
+      const frame = await t.frame();
+      expect(frame).toContain("仓库目录不存在：missing-relative-dir");
+      expect(frame).toContain("相对路径按启动目录解析为");
+      expect(frame).toContain(process.cwd());
+      // 无需关闭任何弹窗：直接在同一对话框里改成真实仓库，校验即通过。
+      await field(t, "repo");
+      await t.mockInput.pressKey("a", { ctrl: true }); await t.mockInput.pressKey("k", { ctrl: true });
+      await t.mockInput.pasteBracketedText(repo);
+      // 粘贴辅助会隐式提交：校验通过后弹窗关闭。
+      await t.frame();
+      expect(wizard.validate()).not.toBeNull();
+    } finally { await t.close(); void running.catch(() => {}); }
+  });
   test("edit missing task, choose workflow input and start with ephemeral typed settings", async () => {
     const repo = repository(); const t = await terminal(120, 38); const wizard = new LaunchWizard(t.ui, command(repo), {}, {}); const running = wizard.run();
     try {

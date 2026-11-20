@@ -8,6 +8,7 @@ import type { LayerOverrides } from "../../config/layers.js";
 import type { RunCommand, TestsCommand } from "../args.js";
 import { CliInputCancelled } from "../input.js";
 import { loadTestPlan } from "../../testing/bundle.js";
+import { guideSection } from "./guide.js";
 import { Workbench, type Item, type Section } from "./workbench.js";
 
 export type LaunchCommand = RunCommand | TestsCommand;
@@ -101,11 +102,16 @@ export class LaunchWizard {
   private build(): void {
     const command = this.command;
     const basic: Field[] = [this.path("repo", "目标仓库", () => command.repo, text => {
-      if (!existsSync(text) || !statSync(text).isDirectory()) throw new Error("请选择存在的仓库目录");
-      const previous = command.repo; command.repo = resolve(text);
+      // 相对路径以启动命令时所在的目录为基准；报错时把解析结果亮出来，
+      // 让"填到哪里去了"一目了然，而不是让用户对着静默失败猜。
+      const resolvedText = resolve(text);
+      if (!existsSync(resolvedText) || !statSync(resolvedText).isDirectory()) {
+        throw new Error(`仓库目录不存在：${text}\n（相对路径按启动目录解析为 ${resolvedText}；当前目录：${process.cwd()}）`);
+      }
+      const previous = command.repo; command.repo = resolvedText;
       try { const next = this.resolveConfiguration(); this.limits = next.limits; this.pipeline = next.pipeline; }
       catch (error) { command.repo = previous; throw error; }
-    }, "directory", "选择 Git 仓库；更换仓库后重新加载该项目的配置。")];
+    }, "directory", "选择 Git 仓库；支持相对路径（按启动目录解析）与绝对路径；更换仓库后重新加载该项目的配置。")];
     if (command.kind === "run") basic.push(this.text("task", "重构需求", () => command.task, text => { command.task = text; }, "描述希望进行的重构；启动前必须填写。", true));
     else if (command.action === "prepare") basic.push(this.text("scope", "测试保护范围", () => command.scope ?? "", text => { command.scope = text; }, "描述需要保护的模块、行为和边界条件。", true));
     else basic.push(this.path("from", "已保存测试方案", () => command.from ?? "", text => { command.from = text; }, "directory", "选择包含 plan.json 的方案版本目录。"));
@@ -181,15 +187,15 @@ export class LaunchWizard {
         { text: failure ?? "必填项和配置校验通过。", tone: failure ? "error" : "success" },
         { text: this.notice, tone: "muted" }, { text: "可导出本次完整配置及启动命令，之后从终端直接复用。", tone: "muted" },
       ], code: JSON.stringify(command.kind === "run" ? { pipeline: this.pipeline, limits: this.limits } : { limits: this.limits }, null, 2) }) }],
-    } satisfies Section];
+    } satisfies Section, guideSection()];
     this.ui.setSections(sections);
     // Keep the selected field after edits, including fields revealed by a mode switch.
     if (selected) { const sectionIndex = sections.findIndex(entry => entry.items().some(item => item.id === selected)); if (sectionIndex >= 0) { this.ui.selectSection(sectionIndex); this.ui.selectItem(sections[sectionIndex]!.items().findIndex(item => item.id === selected)); } }
     this.ui.setStatus("尚未创建运行会话，也未调用 AI。");
-    this.ui.setActions([{ id: "edit", label: "编辑选中项", run: () => this.ui.currentItem()?.activate?.() },
+    this.ui.setActions([{ id: "edit", label: "打开选中项", run: () => this.ui.openSelected() },
       { id: "save", label: "保存项目默认", run: () => this.saveProject() }, { id: "export", label: "导出启动命令", run: () => this.exportLaunch() }, { id: "start", label: "开始", tone: "success", run: () => this.start() },
       { id: "cancel", label: "取消", tone: "muted", run: () => this.done.reject(new CliInputCancelled()) }]);
-    this.ui.setNotice("Enter 编辑 · Tab 切换区域 · 1–6 切换分组");
+    this.ui.setNotice(`Enter 打开 · ${sections.length} 使用指引 · Tab 切换焦点`);
   }
   validate(requireTask = true): string | null {
     try {
